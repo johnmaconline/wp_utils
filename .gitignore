@@ -6,6 +6,11 @@ __pycache__/
 *.jsonl
 .DS_Store
 .vscode/
+.coverage*
+htmlcov*/
+summary/
+downloads/
+ci/results_artifacts/
 all_files.txt
 johnmac_latest.txt
 johnmac_oct2025.txt

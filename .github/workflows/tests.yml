@@ -1,0 +1,198 @@
+name: CI
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  RUN_LABEL: "${{ github.run_number }}-${{ github.run_id }}"
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    env:
+      RUN_LABEL: "${{ github.run_number }}-${{ github.run_id }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r ci/requirements.txt
+          pip install pytest coverage
+
+      - name: Run unit tests
+        run: |
+          set +e
+          source .venv/bin/activate
+          coverage run -m pytest tests/unit --junitxml=unit_tests_report.xml
+          UNIT_STATUS=$?
+          coverage xml -o coverage-unit.xml || true
+          coverage html -d htmlcov-unit || true
+          mv .coverage .coverage.unit || true
+          echo "UNIT_STATUS=${UNIT_STATUS}" >> $GITHUB_ENV
+          exit 0
+
+      - name: Convert unit test results to CSV
+        run: |
+          source .venv/bin/activate
+          python ci/results_processing.py --junit unit_tests_report.xml --csv unit_test_report.csv
+          python ci/results_processing.py --coverage-xml coverage-unit.xml --coverage-csv coverage_unit.csv
+
+      - name: Run system tests
+        run: |
+          set +e
+          source .venv/bin/activate
+          coverage run -m pytest tests/system --junitxml=system_tests_report.xml
+          SYSTEM_STATUS=$?
+          coverage xml -o coverage-system.xml || true
+          coverage html -d htmlcov-system || true
+          mv .coverage .coverage.system || true
+          echo "SYSTEM_STATUS=${SYSTEM_STATUS}" >> $GITHUB_ENV
+          exit 0
+
+      - name: Convert system test results to CSV
+        run: |
+          source .venv/bin/activate
+          python ci/results_processing.py --junit system_tests_report.xml --csv system_test_report.csv
+          python ci/results_processing.py --coverage-xml coverage-system.xml --coverage-csv coverage_system.csv
+
+      - name: Combine coverage
+        run: |
+          source .venv/bin/activate
+          coverage combine .coverage.unit .coverage.system
+          coverage xml -o coverage.xml
+          coverage html -d htmlcov
+          coverage report
+          python ci/results_processing.py --coverage-index --unit htmlcov-unit --system htmlcov-system --combined htmlcov --out summary
+          python ci/results_processing.py --coverage-xml coverage.xml --coverage-csv coverage_combined.csv
+          mkdir -p ci/results_artifacts/coverage-artifacts/${RUN_LABEL}
+          cp coverage_unit.csv ci/results_artifacts/coverage-artifacts/${RUN_LABEL}/${RUN_LABEL}_coverage_unit.csv
+          cp coverage_system.csv ci/results_artifacts/coverage-artifacts/${RUN_LABEL}/${RUN_LABEL}_coverage_system.csv
+          cp coverage_combined.csv ci/results_artifacts/coverage-artifacts/${RUN_LABEL}/${RUN_LABEL}_coverage_combined.csv
+          cp coverage*.xml ci/results_artifacts/coverage-artifacts/${RUN_LABEL}/
+          python ci/concat.py ci/results_artifacts/coverage-artifacts/${RUN_LABEL} --outfile ci/results_artifacts/coverage-artifacts/${RUN_LABEL}/${RUN_LABEL}_coverage_summary --root . --no-summary
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-artifacts
+          path: |
+            ci/results_artifacts/coverage-artifacts/${{ env.RUN_LABEL }}
+            summary/coverage_summary.html
+
+      - name: Build test report Excel (with summary)
+        run: |
+          source .venv/bin/activate
+          mkdir -p ci/results_artifacts/test-reports/${RUN_LABEL}
+          cp unit_test_report.csv ci/results_artifacts/test-reports/${RUN_LABEL}/${RUN_LABEL}_unit_test_report.csv
+          cp system_test_report.csv ci/results_artifacts/test-reports/${RUN_LABEL}/${RUN_LABEL}_system_test_report.csv
+          cp unit_tests_report.xml ci/results_artifacts/test-reports/${RUN_LABEL}/${RUN_LABEL}_unit_tests_report.xml
+          cp system_tests_report.xml ci/results_artifacts/test-reports/${RUN_LABEL}/${RUN_LABEL}_system_tests_report.xml
+          python ci/concat.py ci/results_artifacts/test-reports/${RUN_LABEL} --outfile ci/results_artifacts/test-reports/${RUN_LABEL}/${RUN_LABEL}_test_reports_summary --root .
+
+      - name: Upload test report artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            ci/results_artifacts/test-reports/${{ env.RUN_LABEL }}
+
+      - name: Fail if any tests failed
+        run: |
+          u=${UNIT_STATUS:-0}
+          s=${SYSTEM_STATUS:-0}
+          echo "Unit status: $u, System status: $s"
+          if [ "$u" != "0" ] || [ "$s" != "0" ]; then
+            exit 1
+          fi
+
+      - name: Debug test artifacts
+        if: always()
+        run: |
+          echo "Listing test artifacts (RUN_LABEL=${RUN_LABEL}):"
+          find ci/results_artifacts/test-reports -maxdepth 3 -type f -print || true
+
+  results-post-processing:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    if: always() && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install CI dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r ci/requirements.txt
+
+      - name: Download last 10 artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p downloads/test downloads/coverage
+          gh run download $GITHUB_RUN_ID --repo "$GITHUB_REPOSITORY" --name test-reports --dir downloads/test/${RUN_LABEL} || true
+          gh run download $GITHUB_RUN_ID --repo "$GITHUB_REPOSITORY" --name coverage-artifacts --dir downloads/coverage/${RUN_LABEL} || true
+          runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow tests.yml --limit 10 --json databaseId,number -q '.[] | "\(.number)-\(.databaseId)"')
+          for runpair in $runs; do
+            run_id=${runpair#*-}
+            run_num=${runpair%-*}
+            gh run download $run_id --repo "$GITHUB_REPOSITORY" --name test-reports --dir downloads/test/${run_num}-${run_id} || true
+            gh run download $run_id --repo "$GITHUB_REPOSITORY" --name coverage-artifacts --dir downloads/coverage/${run_num}-${run_id} || true
+          done
+          echo "Downloaded test files:" && find downloads/test -type f || true
+          echo "Downloaded coverage files:" && find downloads/coverage -type f || true
+
+      - name: Unpack any zips in downloads
+        run: |
+          find downloads -type f \( -name '*.zip' -o -name '*.tar' -o -name '*.tar.gz' \) -print -exec sh -c 'd=$(dirname "$1"); unzip -o "$1" -d "$d" || tar -xf "$1" -C "$d" || true' _ {} \;
+          echo "After unpack, test files:" && find downloads/test -type f -maxdepth 4 -print || true
+          echo "After unpack, coverage files:" && find downloads/coverage -type f -maxdepth 4 -print || true
+
+      - name: Build comparison Excel (tests)
+        run: |
+          source .venv/bin/activate
+          echo "Listing downloads/test contents:"
+          find downloads/test -type f
+          echo "Glob test summaries:"
+          find downloads/test -type f -name "test_reports_summary.xlsx"
+          python ci/compare_all_results.py --pattern "**/*test_reports_summary*.xlsx" --root downloads/test --outfile downloads/test/test_reports_comparison --max-files 10 --key-cols classname,source_file,testcase,suite_type --keep-cols "classname,source_file,testcase,suite_type,status"
+
+      - name: Build comparison Excel (coverage)
+        run: |
+          source .venv/bin/activate
+          echo "Listing downloads/coverage contents:"
+          find downloads/coverage -type f
+          echo "Glob coverage summaries:"
+          find downloads/coverage -type f -name "coverage_summary.xlsx"
+          python ci/compare_all_results.py --pattern "**/*coverage_summary*.xlsx" --root downloads/coverage --outfile downloads/coverage/coverage_comparison --max-files 10 --key-cols file --keep-cols "file,coverage_pct"
+
+      - name: Upload comparison artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-excel
+          path: |
+            downloads/test/test_reports_comparison-summary-comparison.xlsx
+            downloads/coverage/coverage_comparison-summary-comparison.xlsx
