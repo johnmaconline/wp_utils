@@ -1,0 +1,129 @@
+# wp_utils
+
+Utilities for working with a WordPress blog:
+
+- Download posts via the WordPress REST API and concatenate them.
+- Classify posts with OpenAI and add a category (additive).
+- Schedule posts to WordPress and optionally post to Twitter/X.
+- CI post‑processing utilities (copied from `jobber.ai/ci`).
+
+## Scripts
+
+### `wp_utilities.py`
+Downloads posts via the WP REST API, concatenates files, and can list plugins.
+
+Args:
+- `--url` URL of the site or WP API root
+- `--number` Number of posts to download
+- `--outdir` Directory to save posts (default: `posts`)
+- `--indir` One or more input dirs for concat (space‑separated)
+- `--outfile` Concat output file name (default: `all_files`)
+- `--word` Save Word documents in addition to text
+- `--download` Download posts
+- `--concat` Concatenate files
+- `--get-plugins` Print plugin list via WP REST API (requires credentials)
+- `--wp-username` WordPress username (or env `WP_USERNAME`)
+- `--wp-app-password` WordPress application password (or env `WP_APP_PASSWORD`)
+- `-v/--verbose` Verbose logging
+- `-q/--quiet` Minimal stdout
+
+Examples:
+- Download all posts:
+  ```bash
+  python3 wp_utilities.py --download --url https://johnmaconline.com --outdir posts
+  ```
+- Download and concatenate:
+  ```bash
+  python3 wp_utilities.py --download --url https://johnmaconline.com --outdir posts --concat --outfile all_files
+  ```
+- Get plugins (requires credentials):
+  ```bash
+  export WP_USERNAME="your_wp_user"
+  export WP_APP_PASSWORD="xxxx xxxx xxxx xxxx xxxx"
+  python3 wp_utilities.py --get-plugins --url https://johnmaconline.com
+  ```
+
+### `categorize_wp_posts.py`
+Uses OpenAI to decide if posts should be tagged with a target category and additively updates categories.
+
+Args:
+- `--url` Site URL or WP API URL (required)
+- `--target-category` Category to add when matched (default: `AI`)
+- `--only-category` Only process posts already in this category (by name)
+- `--model` OpenAI model (default: `gpt-4.1`)
+- `--limit` Max number of posts
+- `--max-chars` Max chars sent to model (default: `8000`)
+- `--min-confidence` Minimum confidence to add category (default: `0.8`)
+- `--dry-run` No updates, just report
+- `--sleep` Seconds to sleep between OpenAI calls (default: `0.4`)
+- `--report` JSONL report path
+- `--updated-csv` CSV output path (default: `updated_posts.csv`)
+- `--confidence-column` Include confidence in CSV
+- `--overwrite-csv` Overwrite CSV instead of append
+- `--wp-username` WordPress username (or env `WP_USERNAME`)
+- `--wp-app-password` WordPress application password (or env `WP_APP_PASSWORD`)
+- `--openai-api-key` OpenAI API key (or env `OPENAI_API_KEY`)
+- `-v/--verbose` Verbose logging
+- `-q/--quiet` Minimal stdout
+
+Examples:
+- Dry‑run, only posts already in `The250`:
+  ```bash
+  export OPENAI_API_KEY="..."
+  python3 categorize_wp_posts.py --url https://johnmaconline.com --target-category AI --only-category The250 --dry-run
+  ```
+- Apply updates:
+  ```bash
+  export OPENAI_API_KEY="..."
+  export WP_USERNAME="your_wp_user"
+  export WP_APP_PASSWORD="xxxx xxxx xxxx xxxx xxxx"
+  python3 categorize_wp_posts.py --url https://johnmaconline.com --target-category AI
+  ```
+
+### `post.py`
+Schedules a markdown post on WordPress and optionally posts a Twitter/X thread.
+
+Args:
+- `--file` Path to the markdown file (required)
+- `--title` Title of the blog post (required)
+- `--date` Publish date (YYYY‑MM‑DD, Eastern Time) (required)
+- `--model` OpenAI model for SEO fields (default: `gpt-4`)
+- `-v/--verbose` Verbose logging
+- `-q/--quiet` Minimal stdout
+
+Required env vars:
+- `WP_USERNAME`
+- `WP_APP_PASSWORD`
+- `OPENAI_API_KEY`
+
+Optional Twitter/X env vars:
+- `TWITTER_API_KEY`
+- `TWITTER_API_SECRET`
+- `TWITTER_ACCESS_TOKEN`
+- `TWITTER_ACCESS_SECRET`
+
+## Credentials
+
+### WordPress
+Use a WordPress **Application Password** (not your normal login password). Create one in:
+`WordPress Admin → Users → Profile → Application Passwords`.
+
+Then set:
+```bash
+export WP_USERNAME="your_wp_user"
+export WP_APP_PASSWORD="xxxx xxxx xxxx xxxx xxxx"
+```
+
+### OpenAI
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+## Tests
+
+Run all tests locally:
+```bash
+pytest
+```
+
+CI runs the same tests and post‑processing steps via `.github/workflows/tests.yml`.

@@ -10,6 +10,7 @@
 #
 ##########################################################################################
 
+import base64
 import requests
 from bs4 import BeautifulSoup, NavigableString
 import argparse
@@ -352,12 +353,26 @@ def add_hyperlink(paragraph, url, text):
     paragraph._p.clear_content()
     paragraph._p.append(hyperlink)
 
+def build_wp_api_base(url):
+    url = (url or '').strip()
+    if not url:
+        return ''
+
+    normalized = url.rstrip('/')
+    if '/wp-json/' in normalized:
+        base = normalized.split('/wp-json/')[0]
+        return base.rstrip('/')
+
+    parsed = urlparse(normalized)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    return normalized
+
 def build_wp_api_posts_url(url):
     url = (url or '').strip()
     if not url:
         return ''
-    parsed = urlparse(url)
-    base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else url.rstrip('/')
     normalized = url.rstrip('/')
 
     if '/wp-json/' in normalized:
@@ -368,7 +383,42 @@ def build_wp_api_posts_url(url):
         if normalized.endswith('/wp-json'):
             return normalized + '/wp/v2/posts'
 
+    base = build_wp_api_base(normalized)
+    if not base:
+        return ''
     return base.rstrip('/') + '/wp-json/wp/v2/posts'
+
+def build_wp_api_plugins_url(url):
+    base = build_wp_api_base(url)
+    if not base:
+        return ''
+    return base.rstrip('/') + '/wp-json/wp/v2/plugins'
+
+def build_auth_header(username, app_password):
+    token = base64.b64encode(
+        f"{username}:{app_password}".encode()).decode("utf-8")
+    return {"Authorization": f"Basic {token}"}
+
+def fetch_wp_plugins(url, headers):
+    plugins_url = build_wp_api_plugins_url(url)
+    if not plugins_url:
+        log.error("Invalid URL for WordPress API.")
+        return None
+    plugins = []
+    page = 1
+    while True:
+        params = {'per_page': WP_API_MAX_PER_PAGE, 'page': page}
+        response = requests.get(plugins_url, headers=headers, params=params)
+        if response.status_code >= 400:
+            log.error(f"Failed to fetch plugins: {response.status_code} {response.text}")
+            return None
+        data = response.json()
+        plugins.extend(data)
+        total_pages = int(response.headers.get('X-WP-TotalPages', 1))
+        if page >= total_pages:
+            break
+        page += 1
+    return plugins
 
 def format_wp_api_date(date_str):
     if not date_str:
@@ -645,6 +695,18 @@ def handle_args():
         action='store_true',
         help='Download blog posts.')    
     parser.add_argument(
+        '--get-plugins',
+        action='store_true',
+        help='Fetch and print WordPress plugins via the REST API (requires credentials).')
+    parser.add_argument(
+        '--wp-username',
+        default=os.getenv('WP_USERNAME'),
+        help='WordPress username (or set WP_USERNAME env var)')
+    parser.add_argument(
+        '--wp-app-password',
+        default=os.getenv('WP_APP_PASSWORD'),
+        help='WordPress application password (or set WP_APP_PASSWORD env var)')
+    parser.add_argument(
         '--concat',
         action='store_true',
         help='Concat files.')
@@ -678,6 +740,9 @@ def handle_args():
         else:
             log.error(f'XXX Must supply a URL')
             sys.exit(1)
+    if args.get_plugins and not args.url:
+        log.error('XXX Must supply a URL for --get-plugins')
+        sys.exit(1)
 
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
     log.info(f'+  {os.path.basename(sys.argv[0])}')
@@ -687,6 +752,8 @@ def handle_args():
         log.info(f'+  Target URL: {args.url}')
         log.info(f'+  Number of posts to download: {"All" if args.number is None else args.number}')
         log.info(f'+  Output directory: {args.outdir}')
+    if args.get_plugins:
+        log.info('+  Fetching plugin list via WP API')
     if args.concat:
         log.info(f'+  Concatenating files')
         log.info(f'+  Output file: {args.outfile}')
@@ -707,6 +774,24 @@ def main():
     args = handle_args()
     # Build initial list of directories to check for existing posts
     indir_list = args.indir or []
+    if args.get_plugins:
+        if not args.wp_username or not args.wp_app_password:
+            log.error('XXX Missing WP credentials for --get-plugins')
+            sys.exit(1)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+        }
+        headers.update(build_auth_header(args.wp_username, args.wp_app_password))
+        plugins = fetch_wp_plugins(args.url, headers)
+        if plugins is None:
+            sys.exit(1)
+        print("name,status,version,plugin")
+        for plugin in plugins:
+            name = (plugin.get('name') or '').replace(',', ' ')
+            status = plugin.get('status') or ''
+            version = plugin.get('version') or ''
+            plugin_file = plugin.get('plugin') or ''
+            print(f"{name},{status},{version},{plugin_file}")
     # Download, using existing indices from all provided indir_list
     if args.download:
         download_blog_posts_wp_api(args.url, args.number, args.outdir, args.word, indir_list)

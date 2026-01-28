@@ -26,6 +26,17 @@ def test_build_wp_api_posts_url_variants():
         == "https://example.com/wp-json/wp/v2/posts"
     )
 
+def test_build_wp_api_base_and_plugins_url():
+    assert wp_utilities.build_wp_api_base("https://example.com") == "https://example.com"
+    assert (
+        wp_utilities.build_wp_api_base("https://example.com/wp-json/wp/v2/posts")
+        == "https://example.com"
+    )
+    assert (
+        wp_utilities.build_wp_api_plugins_url("https://example.com")
+        == "https://example.com/wp-json/wp/v2/plugins"
+    )
+
 
 def test_format_wp_api_date():
     assert wp_utilities.format_wp_api_date("2026-01-27T08:44:00") == "2026-01-27"
