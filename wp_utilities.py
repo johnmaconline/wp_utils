@@ -17,7 +17,6 @@ import logging
 import sys
 import os
 from datetime import date
-import time
 from docx import Document
 from docx.shared import Pt
 from docx.oxml import OxmlElement
@@ -109,87 +108,6 @@ def download_image(image_url, outdir):
 
 
     return None
-
-
-def extract_text(post_soup, outdir):
-    '''
-    Extract the text from the HTML article, including headings, bullet and numbered lists, and images.
-    '''
-    content_div = post_soup.find('div', class_='entry-content')
-    if not content_div:
-        return None
-
-    def append_code_block(code_text):
-        nonlocal content_text
-        if not code_text:
-            return
-        code_text = code_text.strip('\n')
-        if not code_text:
-            return
-        content_text += f"```\n{code_text}\n```\n\n"
-
-    # Extract publication date
-    date_span = post_soup.find('span', class_='published')
-    publication_date = date_span.get_text(strip=True) if date_span else "Date not found"
-    
-    # Format the publication date
-    formatted_date = None
-    if publication_date:
-        try:
-            # Parse and format the date - adjust the format if the input changes
-            date_obj = datetime.strptime(publication_date, '%b %d, %Y')
-            formatted_date = date_obj.strftime('%Y-%m-%d')
-            log.debug(f'Publication date: {formatted_date}')
-        except ValueError as e:
-            log.error(f"Error parsing date '{publication_date}': {e}")
-
-    content_text = ''
-    for child in content_div.find_all(recursive=False):
-        if child.name == 'h1':
-            content_text += f"# {child.get_text(strip=True)}\n\n"
-        elif child.name == 'h2':
-            content_text += f"## {child.get_text(strip=True)}\n\n"
-        elif child.name == 'p':
-            content_text += child.get_text(strip=True) + '\n\n'
-        elif child.name in {'pre', 'code'}:
-            append_code_block(child.get_text())
-        elif child.name == 'div':
-            classes = child.get('class', [])
-            if 'wp-block-code' in classes or 'wp-block-preformatted' in classes:
-                pre = child.find('pre')
-                code = child.find('code') if pre is None else None
-                if pre:
-                    append_code_block(pre.get_text())
-                elif code:
-                    append_code_block(code.get_text())
-            else:
-                for pre in child.find_all('pre'):
-                    append_code_block(pre.get_text())
-        elif child.name == 'ul':
-            for li in child.find_all('li'):
-                content_text += f"* {li.get_text(strip=True)}\n"
-            content_text += '\n'
-        elif child.name == 'ol':
-            index = 1  # Initialize index for ordered list items
-            for li in child.find_all('li'):
-                content_text += f"{index}. {li.get_text(strip=True)}\n"
-                index += 1  # Increment index for each list item
-            content_text += '\n'
-        elif child.name == 'figure' and 'wp-block-image' in child.get('class', []):
-            img_tag = child.find('img')
-            if img_tag and img_tag.get('src'):
-                img_url = img_tag['src']
-                local_image = download_image(img_url, outdir)
-                if local_image:
-                    content_text += f'[image: {local_image}]\n'
-                else:
-                    content_text += f'[image: {img_url} (download failed)]\n'
-            content_text += '\n'
-        # Exclude social sharing buttons or other unwanted content
-        elif 'social-sharing' in child.get('class', []):
-            continue
-
-    return formatted_date, content_text
 
 
 def extract_text_from_html(html_content, outdir):
@@ -434,21 +352,6 @@ def add_hyperlink(paragraph, url, text):
     paragraph._p.clear_content()
     paragraph._p.append(hyperlink)
 
-# Function to download and save blog posts
-def fetch_blog_listing(url, headers):
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
-    return soup.find_all('article'), soup
-
-def fetch_and_parse_post(post_url, headers):
-    time.sleep(1)
-    response = requests.get(post_url, headers=headers)
-    response.raise_for_status()
-    
-    return BeautifulSoup(response.text, 'html.parser')
-
 def build_wp_api_posts_url(url):
     url = (url or '').strip()
     if not url:
@@ -490,118 +393,6 @@ def fetch_wp_posts_page(api_posts_url, headers, page=1, per_page=WP_API_MAX_PER_
     posts = response.json()
     total_pages = int(response.headers.get('X-WP-TotalPages', 1))
     return posts, total_pages
-
-def download_blog_posts(url, number=None, outdir='posts', word=False, indir=None):
-    '''
-    Download all blog posts, handling pagination if needed.
-    '''
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
-    }
-
-    # Create output directory if it doesn't exist
-    # Set of already downloaded posts based on indir_list
-    existing_txt_files = set()
-    existing_docx_files = set()
-    indir_list = indir if indir is not None else []
-    for idir in (indir_list or []):
-        if os.path.isdir(idir):
-            for fname in os.listdir(idir):
-                if fname.endswith(".txt"):
-                    existing_txt_files.add(fname)
-                elif fname.endswith(".docx"):
-                    existing_docx_files.add(fname)
-
-    if not os.path.exists(outdir):
-        os.makedirs(outdir)
-
-    # Track already-seen URLs
-    seen_urls_path = os.path.join(outdir, 'seen_urls.txt')
-    seen_urls = set()
-    if os.path.exists(seen_urls_path):
-        with open(seen_urls_path, 'r') as f:
-            seen_urls = set(line.strip() for line in f if line.strip())
-
-    count = 0
-    next_page_url = url  # Start with the given URL
-
-    consecutive_duplicates = 0
-
-    while next_page_url:
-        try:
-            blog_posts, soup = fetch_blog_listing(next_page_url, headers)
-        except requests.RequestException as e:
-            log.error(f"Failed to fetch blog page: {next_page_url}")
-            return
-
-        if not blog_posts:
-            log.warning("No blog posts found on this page.")
-            break
-
-        for post in blog_posts:
-            if number and count >= number:
-                return  # Stop if we hit the limit
-
-            title_tag = post.find('h2', class_='entry-title')
-            if not title_tag or not title_tag.a:
-                log.warning("No <h2 class='entry-title'> tag found in a blog post, skipping...")
-                continue
-
-            post_url = title_tag.a['href']
-            # Check if URL already seen BEFORE extracting post title
-            if post_url in seen_urls:
-                log.info(f"Skipping already-seen URL: {post_url}")
-                continue
-
-            post_title = title_tag.get_text(strip=True)
-            sanitized_title = sanitize_filename(post_title)
-
-            try:
-                post_soup = fetch_and_parse_post(post_url, headers)
-
-                publication_date, content_text = extract_text(post_soup, outdir)
-                if content_text is None:
-                    log.warning(f"No content found in {post_title}, skipping...")
-                    continue
-
-                filename_with_date = f"{sanitized_title}-{publication_date}"
-                text_filename = filename_with_date + '.txt'
-                docx_filename = filename_with_date + '.docx'
-
-                if is_duplicate_filename(text_filename, docx_filename, existing_txt_files, existing_docx_files):
-                    log.info(f"Skipping duplicate: {text_filename}")
-                    consecutive_duplicates += 1
-                    if consecutive_duplicates >= NUM_DUPLICATES:
-                        log.info(f"Found {NUM_DUPLICATES} filename-based duplicates in a row. Stopping early.")
-                        return
-                    continue
-                else:
-                    consecutive_duplicates = 0
-
-                # Save text file
-                save_text_file(post_title, publication_date, content_text, post_url, outdir, filename_with_date)
-
-                # Save Word file if needed
-                save_word_file(post_title, publication_date, content_text, outdir, filename_with_date, word, log, post_url)
-
-                # Add to seen_urls.txt after successful download
-                with open(seen_urls_path, 'a') as f:
-                    f.write(post_url + '\n')
-
-                count += 1
-
-            except requests.RequestException as e:
-                log.error(f'Failed to fetch blog post: {post_url}')
-
-        # Check for the "Next Page" link
-        next_page_link = soup.find('a', string=lambda text: text and "Older Entries" in text)
-        if next_page_link and next_page_link.get('href'):
-            next_page_url = next_page_link['href']
-            log.info(f'Next page found: {next_page_url}')
-        else:
-            log.info('No more pages to process.')
-            next_page_url = None  # Stop loop
-
 def download_blog_posts_wp_api(url, number=None, outdir='posts', word=False, indir=None):
     '''
     Download blog posts using the WordPress REST API instead of scraping HTML pages.
@@ -854,10 +645,6 @@ def handle_args():
         action='store_true',
         help='Download blog posts.')    
     parser.add_argument(
-        '--wp-api',
-        action='store_true',
-        help='Download blog posts using the WordPress REST API instead of scraping HTML.')
-    parser.add_argument(
         '--concat',
         action='store_true',
         help='Concat files.')
@@ -900,8 +687,6 @@ def handle_args():
         log.info(f'+  Target URL: {args.url}')
         log.info(f'+  Number of posts to download: {"All" if args.number is None else args.number}')
         log.info(f'+  Output directory: {args.outdir}')
-        if args.wp_api:
-            log.info('+  Using WordPress API')
     if args.concat:
         log.info(f'+  Concatenating files')
         log.info(f'+  Output file: {args.outfile}')
@@ -924,10 +709,7 @@ def main():
     indir_list = args.indir or []
     # Download, using existing indices from all provided indir_list
     if args.download:
-        if args.wp_api:
-            download_blog_posts_wp_api(args.url, args.number, args.outdir, args.word, indir_list)
-        else:
-            download_blog_posts(args.url, args.number, args.outdir, args.word, indir_list)
+        download_blog_posts_wp_api(args.url, args.number, args.outdir, args.word, indir_list)
         # After downloading into outdir, include it for concat
         indir_list = indir_list + [args.outdir]
     # Concatenate from all directories (original and newly downloaded)
