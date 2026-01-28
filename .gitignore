@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+*.docx
+*.jsonl
+.DS_Store
+.vscode/
+all_files.txt
+johnmac_latest.txt
+johnmac_oct2025.txt
+updated_posts.csv
+posts/
+dec2025/
+oct2025/
+jan27/
