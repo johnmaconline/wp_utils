@@ -25,6 +25,19 @@ Results from `--get-plugins` or `--download` are written to a file and also prin
 - `--download` Download posts
 - `--concat` Concatenate files
 - `--get-plugins` Print plugin list via WP REST API (requires credentials)
+- `--get-posts` Print posts via WP REST API
+- `--get-pages` Print pages via WP REST API
+- `--get-categories` Print categories via WP REST API
+- `--get-tags` Print tags via WP REST API
+- `--get-users` Print users via WP REST API
+- `--get-user-me` Print current user via WP REST API (requires credentials)
+- `--get-media` Print media items via WP REST API
+- `--get-comments` Print comments via WP REST API
+- `--get-types` Print content types via WP REST API
+- `--get-statuses` Print post statuses via WP REST API
+- `--get-taxonomies` Print taxonomies via WP REST API
+- `--get-settings` Print site settings via WP REST API (requires credentials)
+- `--get-themes` Print themes via WP REST API (requires credentials)
 - `--wp-username` WordPress username (or env `WP_USERNAME`)
 - `--wp-app-password` WordPress application password (or env `WP_APP_PASSWORD`)
 - `-v/--verbose` Verbose logging
@@ -46,6 +59,11 @@ Examples:
   python3 wp_utilities.py --get-plugins --url https://johnmaconline.com --outfile plugins --outfile-format csv
   ```
   This writes `plugins.csv` and also prints to stdout.
+
+- Get categories (public) and save JSON:
+  ```bash
+  python3 wp_utilities.py --get-categories --url https://johnmaconline.com --outfile categories --outfile-format json
+  ```
 
 ### `categorize_wp_posts.py`
 Uses OpenAI to decide if posts should be tagged with a target category and additively updates categories.

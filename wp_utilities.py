@@ -335,6 +335,28 @@ def _select_columns(rows):
     if not rows:
         return []
     keys = set().union(*(row.keys() for row in rows))
+    ops = {row.get('operation') for row in rows}
+    if len(ops) == 1:
+        op = next(iter(ops))
+        op_map = {
+            'get-plugins': ['name', 'operation', 'plugin', 'status', 'version'],
+            'download': ['operation', 'title', 'date', 'url', 'text_path', 'docx_path'],
+            'get-posts': ['id', 'title', 'status', 'date', 'link'],
+            'get-pages': ['id', 'title', 'status', 'date', 'link'],
+            'get-categories': ['id', 'name', 'slug', 'count'],
+            'get-tags': ['id', 'name', 'slug', 'count'],
+            'get-users': ['id', 'name', 'slug', 'link'],
+            'get-user-me': ['id', 'name', 'slug', 'link'],
+            'get-media': ['id', 'title', 'media_type', 'mime_type', 'link'],
+            'get-comments': ['id', 'post', 'author_name', 'status', 'date'],
+            'get-types': ['name', 'slug', 'rest_base', 'description'],
+            'get-statuses': ['name', 'label'],
+            'get-taxonomies': ['name', 'slug', 'description'],
+            'get-settings': ['key', 'value'],
+            'get-themes': ['stylesheet', 'name', 'version', 'status'],
+        }
+        if op in op_map and set(op_map[op]).issubset(keys):
+            return op_map[op]
     if keys.issuperset({'name', 'operation', 'plugin', 'status', 'version'}):
         return ['name', 'operation', 'plugin', 'status', 'version']
     if keys.issuperset({'operation', 'title', 'date', 'url', 'text_path', 'docx_path'}):
@@ -502,6 +524,126 @@ def fetch_wp_plugins(url, headers):
             break
         page += 1
     return plugins
+
+
+def fetch_wp_endpoint(url, endpoint, headers, params=None):
+    base = build_wp_api_base(url)
+    if not base:
+        log.error("Invalid URL for WordPress API.")
+        return None
+    endpoint = endpoint.lstrip('/')
+    full_url = f"{base.rstrip('/')}/wp-json/wp/v2/{endpoint}"
+    params = dict(params or {})
+    params.setdefault('per_page', WP_API_MAX_PER_PAGE)
+    page = 1
+    items = []
+    while True:
+        params['page'] = page
+        response = requests.get(full_url, headers=headers, params=params)
+        if response.status_code >= 400:
+            log.error(f"Failed to fetch {endpoint}: {response.status_code} {response.text}")
+            return None
+        data = response.json()
+        if isinstance(data, list):
+            items.extend(data)
+            total_pages = int(response.headers.get('X-WP-TotalPages', 1))
+            if page >= total_pages:
+                break
+            page += 1
+        else:
+            return data
+    return items
+
+
+def normalize_wp_rows(operation, data):
+    if data is None:
+        return []
+    rows = []
+    if isinstance(data, dict):
+        if operation == 'get-settings':
+            return [{'operation': operation, 'key': k, 'value': v} for k, v in data.items()]
+        if operation in {'get-types', 'get-statuses', 'get-taxonomies'}:
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    row = {'operation': operation, 'name': key}
+                    row.update({
+                        'slug': value.get('slug') or '',
+                        'rest_base': value.get('rest_base') or '',
+                        'description': value.get('description') or '',
+                        'label': value.get('label') or ''
+                    })
+                    rows.append(row)
+            return rows
+        if operation == 'get-user-me':
+            return [{
+                'operation': operation,
+                'id': data.get('id'),
+                'name': data.get('name') or '',
+                'slug': data.get('slug') or '',
+                'link': data.get('link') or ''
+            }]
+        return [{'operation': operation, **data}]
+
+    def _title(item):
+        title_html = (item.get('title') or {}).get('rendered', '')
+        return BeautifulSoup(title_html, 'html.parser').get_text().strip()
+
+    for item in data:
+        if operation in {'get-posts', 'get-pages'}:
+            rows.append({
+                'operation': operation,
+                'id': item.get('id'),
+                'title': _title(item),
+                'status': item.get('status') or '',
+                'date': item.get('date') or '',
+                'link': item.get('link') or ''
+            })
+        elif operation in {'get-categories', 'get-tags'}:
+            rows.append({
+                'operation': operation,
+                'id': item.get('id'),
+                'name': item.get('name') or '',
+                'slug': item.get('slug') or '',
+                'count': item.get('count') or 0
+            })
+        elif operation == 'get-users':
+            rows.append({
+                'operation': operation,
+                'id': item.get('id'),
+                'name': item.get('name') or '',
+                'slug': item.get('slug') or '',
+                'link': item.get('link') or ''
+            })
+        elif operation == 'get-media':
+            title_html = (item.get('title') or {}).get('rendered', '')
+            rows.append({
+                'operation': operation,
+                'id': item.get('id'),
+                'title': BeautifulSoup(title_html, 'html.parser').get_text().strip(),
+                'media_type': item.get('media_type') or '',
+                'mime_type': item.get('mime_type') or '',
+                'link': item.get('link') or ''
+            })
+        elif operation == 'get-comments':
+            rows.append({
+                'operation': operation,
+                'id': item.get('id'),
+                'post': item.get('post') or '',
+                'author_name': item.get('author_name') or '',
+                'status': item.get('status') or '',
+                'date': item.get('date') or ''
+            })
+        elif operation == 'get-themes':
+            rows.append({
+                'operation': operation,
+                'stylesheet': item.get('stylesheet') or '',
+                'name': item.get('name') or '',
+                'version': item.get('version') or '',
+                'status': item.get('status') or ''
+            })
+        else:
+            rows.append({'operation': operation, **item})
+    return rows
 
 def format_wp_api_date(date_str):
     if not date_str:
@@ -797,6 +939,58 @@ def handle_args():
         action='store_true',
         help='Fetch and print WordPress plugins via the REST API (requires credentials).')
     parser.add_argument(
+        '--get-posts',
+        action='store_true',
+        help='Fetch and print posts via the REST API.')
+    parser.add_argument(
+        '--get-pages',
+        action='store_true',
+        help='Fetch and print pages via the REST API.')
+    parser.add_argument(
+        '--get-categories',
+        action='store_true',
+        help='Fetch and print categories via the REST API.')
+    parser.add_argument(
+        '--get-tags',
+        action='store_true',
+        help='Fetch and print tags via the REST API.')
+    parser.add_argument(
+        '--get-users',
+        action='store_true',
+        help='Fetch and print users via the REST API.')
+    parser.add_argument(
+        '--get-user-me',
+        action='store_true',
+        help='Fetch and print current user details (requires credentials).')
+    parser.add_argument(
+        '--get-media',
+        action='store_true',
+        help='Fetch and print media items via the REST API.')
+    parser.add_argument(
+        '--get-comments',
+        action='store_true',
+        help='Fetch and print comments via the REST API.')
+    parser.add_argument(
+        '--get-types',
+        action='store_true',
+        help='Fetch and print content types via the REST API.')
+    parser.add_argument(
+        '--get-statuses',
+        action='store_true',
+        help='Fetch and print post statuses via the REST API.')
+    parser.add_argument(
+        '--get-taxonomies',
+        action='store_true',
+        help='Fetch and print taxonomies via the REST API.')
+    parser.add_argument(
+        '--get-settings',
+        action='store_true',
+        help='Fetch and print site settings (requires credentials).')
+    parser.add_argument(
+        '--get-themes',
+        action='store_true',
+        help='Fetch and print themes (requires credentials).')
+    parser.add_argument(
         '--wp-username',
         default=os.getenv('WP_USERNAME'),
         help='WordPress username (or set WP_USERNAME env var)')
@@ -838,8 +1032,10 @@ def handle_args():
         else:
             log.error(f'XXX Must supply a URL')
             sys.exit(1)
-    if args.get_plugins and not args.url:
-        log.error('XXX Must supply a URL for --get-plugins')
+    if (args.get_plugins or args.get_posts or args.get_pages or args.get_categories or args.get_tags or
+            args.get_users or args.get_user_me or args.get_media or args.get_comments or args.get_types or
+            args.get_statuses or args.get_taxonomies or args.get_settings or args.get_themes) and not args.url:
+        log.error('XXX Must supply a URL for --get-* operations')
         sys.exit(1)
 
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
@@ -852,6 +1048,32 @@ def handle_args():
         log.info(f'+  Output directory: {args.outdir}')
     if args.get_plugins:
         log.info('+  Fetching plugin list via WP API')
+    if args.get_posts:
+        log.info('+  Fetching posts via WP API')
+    if args.get_pages:
+        log.info('+  Fetching pages via WP API')
+    if args.get_categories:
+        log.info('+  Fetching categories via WP API')
+    if args.get_tags:
+        log.info('+  Fetching tags via WP API')
+    if args.get_users:
+        log.info('+  Fetching users via WP API')
+    if args.get_user_me:
+        log.info('+  Fetching current user via WP API')
+    if args.get_media:
+        log.info('+  Fetching media via WP API')
+    if args.get_comments:
+        log.info('+  Fetching comments via WP API')
+    if args.get_types:
+        log.info('+  Fetching types via WP API')
+    if args.get_statuses:
+        log.info('+  Fetching statuses via WP API')
+    if args.get_taxonomies:
+        log.info('+  Fetching taxonomies via WP API')
+    if args.get_settings:
+        log.info('+  Fetching settings via WP API')
+    if args.get_themes:
+        log.info('+  Fetching themes via WP API')
     if args.concat:
         log.info(f'+  Concatenating files')
         log.info(f'+  Output file: {args.outfile}')
@@ -874,26 +1096,116 @@ def main():
     indir_list = args.indir or []
     results_outfile = args.outfile or f"out.{args.outfile_format}"
     results_rows = []
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+    }
+    if args.wp_username and args.wp_app_password:
+        headers.update(build_auth_header(args.wp_username, args.wp_app_password))
     if args.get_plugins:
         if not args.wp_username or not args.wp_app_password:
             log.error('XXX Missing WP credentials for --get-plugins')
             sys.exit(1)
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
-        }
-        headers.update(build_auth_header(args.wp_username, args.wp_app_password))
         plugins = fetch_wp_plugins(args.url, headers)
         if plugins is None:
             sys.exit(1)
+        rows = []
         for plugin in plugins:
-            results_rows.append({
+            rows.append({
                 'operation': 'get-plugins',
                 'name': (plugin.get('name') or ''),
                 'status': plugin.get('status') or '',
                 'version': plugin.get('version') or '',
                 'plugin': plugin.get('plugin') or ''
             })
-        print(render_ascii_table(results_rows))
+        results_rows.extend(rows)
+        print(render_ascii_table(rows))
+    if args.get_posts:
+        data = fetch_wp_endpoint(args.url, 'posts', headers)
+        rows = normalize_wp_rows('get-posts', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_pages:
+        data = fetch_wp_endpoint(args.url, 'pages', headers)
+        rows = normalize_wp_rows('get-pages', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_categories:
+        data = fetch_wp_endpoint(args.url, 'categories', headers)
+        rows = normalize_wp_rows('get-categories', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_tags:
+        data = fetch_wp_endpoint(args.url, 'tags', headers)
+        rows = normalize_wp_rows('get-tags', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_users:
+        data = fetch_wp_endpoint(args.url, 'users', headers)
+        rows = normalize_wp_rows('get-users', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_user_me:
+        if not args.wp_username or not args.wp_app_password:
+            log.error('XXX Missing WP credentials for --get-user-me')
+            sys.exit(1)
+        data = fetch_wp_endpoint(args.url, 'users/me', headers, params={'context': 'edit'})
+        rows = normalize_wp_rows('get-user-me', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_media:
+        data = fetch_wp_endpoint(args.url, 'media', headers)
+        rows = normalize_wp_rows('get-media', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_comments:
+        data = fetch_wp_endpoint(args.url, 'comments', headers)
+        rows = normalize_wp_rows('get-comments', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_types:
+        data = fetch_wp_endpoint(args.url, 'types', headers)
+        rows = normalize_wp_rows('get-types', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_statuses:
+        data = fetch_wp_endpoint(args.url, 'statuses', headers)
+        rows = normalize_wp_rows('get-statuses', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_taxonomies:
+        data = fetch_wp_endpoint(args.url, 'taxonomies', headers)
+        rows = normalize_wp_rows('get-taxonomies', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_settings:
+        if not args.wp_username or not args.wp_app_password:
+            log.error('XXX Missing WP credentials for --get-settings')
+            sys.exit(1)
+        data = fetch_wp_endpoint(args.url, 'settings', headers)
+        rows = normalize_wp_rows('get-settings', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
+    if args.get_themes:
+        if not args.wp_username or not args.wp_app_password:
+            log.error('XXX Missing WP credentials for --get-themes')
+            sys.exit(1)
+        data = fetch_wp_endpoint(args.url, 'themes', headers)
+        rows = normalize_wp_rows('get-themes', data)
+        results_rows.extend(rows)
+        if rows:
+            print(render_ascii_table(rows))
     # Download, using existing indices from all provided indir_list
     if args.download:
         download_results = download_blog_posts_wp_api(args.url, args.number, args.outdir, args.word, indir_list)
