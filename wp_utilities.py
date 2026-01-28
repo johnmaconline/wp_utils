@@ -345,8 +345,8 @@ def _select_columns(rows):
             'get-pages': ['id', 'title', 'status', 'date', 'link'],
             'get-categories': ['id', 'name', 'slug', 'count'],
             'get-tags': ['id', 'name', 'slug', 'count'],
-            'get-users': ['id', 'name', 'slug', 'link'],
-            'get-user-me': ['id', 'name', 'slug', 'link'],
+            'get-users': ['id', 'name', 'registered_date', 'roles', 'capabilities'],
+            'get-user-me': ['id', 'name', 'registered_date', 'roles', 'capabilities'],
             'get-media': ['id', 'title', 'media_type', 'mime_type', 'link'],
             'get-comments': ['id', 'post', 'author_name', 'status', 'date'],
             'get-types': ['name', 'slug', 'rest_base', 'description'],
@@ -370,19 +370,43 @@ def render_ascii_table(rows):
     columns = _select_columns(rows)
     if not columns:
         return ''
+    def _format_value(col, value):
+        if value is None:
+            value = ''
+        value = str(value)
+        if col == 'registered_date' and 'T' in value:
+            value = value.split('T', 1)[0]
+        return value
+
     widths = {col: len(col) for col in columns}
     for row in rows:
         for col in columns:
-            val = row.get(col, '')
-            if val is None:
-                val = ''
-            widths[col] = max(widths[col], len(str(val)))
+            val = _format_value(col, row.get(col, ''))
+            widths[col] = max(widths[col], len(val))
+
+    def _truncate(value, width):
+        if len(value) <= width:
+            return value
+        if width <= 3:
+            return value[:width]
+        return value[:width - 3] + '...'
 
     def _format_row(values):
         parts = []
         for col in columns:
-            parts.append(str(values.get(col, '') if values else '').ljust(widths[col]))
+            raw = _format_value(col, values.get(col, '') if values else '')
+            parts.append(_truncate(raw, widths[col]).ljust(widths[col]))
         return "| " + " | ".join(parts) + " |"
+
+    def _line_length():
+        return len(_format_row({col: col for col in columns}))
+
+    min_width = 4
+    while _line_length() > 80:
+        widest = max(columns, key=lambda c: widths[c])
+        if widths[widest] <= min_width:
+            break
+        widths[widest] -= 1
 
     border = "+-" + "-+-".join("-" * widths[col] for col in columns) + "-+"
     header = _format_row({col: col for col in columns})
@@ -575,12 +599,21 @@ def normalize_wp_rows(operation, data):
                     rows.append(row)
             return rows
         if operation == 'get-user-me':
+            roles = data.get('roles') or []
+            capabilities = data.get('capabilities') or {}
+            if isinstance(capabilities, dict):
+                cap_list = [k for k, v in capabilities.items() if v]
+            else:
+                cap_list = []
             return [{
                 'operation': operation,
                 'id': data.get('id'),
                 'name': data.get('name') or '',
                 'slug': data.get('slug') or '',
-                'link': data.get('link') or ''
+                'link': data.get('link') or '',
+                'registered_date': data.get('registered_date') or '',
+                'roles': ';'.join(roles) if isinstance(roles, list) else str(roles),
+                'capabilities': ';'.join(cap_list)
             }]
         return [{'operation': operation, **data}]
 
@@ -607,12 +640,21 @@ def normalize_wp_rows(operation, data):
                 'count': item.get('count') or 0
             })
         elif operation == 'get-users':
+            roles = item.get('roles') or []
+            capabilities = item.get('capabilities') or {}
+            if isinstance(capabilities, dict):
+                cap_list = [k for k, v in capabilities.items() if v]
+            else:
+                cap_list = []
             rows.append({
                 'operation': operation,
                 'id': item.get('id'),
                 'name': item.get('name') or '',
                 'slug': item.get('slug') or '',
-                'link': item.get('link') or ''
+                'link': item.get('link') or '',
+                'registered_date': item.get('registered_date') or '',
+                'roles': ';'.join(roles) if isinstance(roles, list) else str(roles),
+                'capabilities': ';'.join(cap_list)
             })
         elif operation == 'get-media':
             title_html = (item.get('title') or {}).get('rendered', '')
@@ -1144,7 +1186,10 @@ def main():
         if rows:
             print(render_ascii_table(rows))
     if args.get_users:
-        data = fetch_wp_endpoint(args.url, 'users', headers)
+        if not args.wp_username or not args.wp_app_password:
+            log.error('XXX Missing WP credentials for --get-users')
+            sys.exit(1)
+        data = fetch_wp_endpoint(args.url, 'users', headers, params={'context': 'edit'})
         rows = normalize_wp_rows('get-users', data)
         results_rows.extend(rows)
         if rows:
