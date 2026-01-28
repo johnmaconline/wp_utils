@@ -358,6 +358,9 @@ def build_wp_api_base(url):
     if not url:
         return ''
 
+    if '://' not in url:
+        url = f"https://{url}"
+
     normalized = url.rstrip('/')
     if '/wp-json/' in normalized:
         base = normalized.split('/wp-json/')[0]

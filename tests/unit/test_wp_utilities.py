@@ -32,6 +32,7 @@ def test_build_wp_api_base_and_plugins_url():
         wp_utilities.build_wp_api_base("https://example.com/wp-json/wp/v2/posts")
         == "https://example.com"
     )
+    assert wp_utilities.build_wp_api_base("example.com") == "https://example.com"
     assert (
         wp_utilities.build_wp_api_plugins_url("https://example.com")
         == "https://example.com/wp-json/wp/v2/plugins"
