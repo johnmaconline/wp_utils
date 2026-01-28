@@ -331,6 +331,86 @@ def save_word_file(post_title, publication_date, content_text, outdir, filename_
     return None
 
 
+def _select_columns(rows):
+    if not rows:
+        return []
+    keys = set().union(*(row.keys() for row in rows))
+    if keys.issuperset({'name', 'operation', 'plugin', 'status', 'version'}):
+        return ['name', 'operation', 'plugin', 'status', 'version']
+    if keys.issuperset({'operation', 'title', 'date', 'url', 'text_path', 'docx_path'}):
+        return ['operation', 'title', 'date', 'url', 'text_path', 'docx_path']
+    return sorted(keys)
+
+
+def render_ascii_table(rows):
+    if not rows:
+        return ''
+    columns = _select_columns(rows)
+    if not columns:
+        return ''
+    widths = {col: len(col) for col in columns}
+    for row in rows:
+        for col in columns:
+            val = row.get(col, '')
+            if val is None:
+                val = ''
+            widths[col] = max(widths[col], len(str(val)))
+
+    def _format_row(values):
+        parts = []
+        for col in columns:
+            parts.append(str(values.get(col, '') if values else '').ljust(widths[col]))
+        return "| " + " | ".join(parts) + " |"
+
+    border = "+-" + "-+-".join("-" * widths[col] for col in columns) + "-+"
+    header = _format_row({col: col for col in columns})
+    lines = [border, header, border]
+    for row in rows:
+        lines.append(_format_row(row))
+    lines.append(border)
+    return "\n".join(lines)
+
+
+def render_results(rows, outfile_format):
+    if not rows:
+        return ''
+    fmt = (outfile_format or 'csv').lower()
+    if fmt not in {'csv', 'json'}:
+        raise ValueError(f"Invalid outfile format: {outfile_format}")
+    if fmt == 'json':
+        import json
+        return json.dumps(rows, indent=2)
+    fieldnames = sorted({k for row in rows for k in row.keys()})
+    lines = [','.join(fieldnames)]
+    for row in rows:
+        values = []
+        for key in fieldnames:
+            value = row.get(key, "")
+            if value is None:
+                value = ""
+            value = str(value).replace('\n', ' ').replace('\r', ' ')
+            if ',' in value or '"' in value:
+                value = '"' + value.replace('"', '""') + '"'
+            values.append(value)
+        lines.append(','.join(values))
+    return '\n'.join(lines)
+
+
+def write_results(outfile_base, outfile_format, rows):
+    if not rows:
+        return None
+    fmt = (outfile_format or 'csv').lower()
+    outfile_base = outfile_base or 'out'
+    if fmt == 'json':
+        path = outfile_base if outfile_base.endswith('.json') else f"{outfile_base}.json"
+    else:
+        path = outfile_base if outfile_base.endswith('.csv') else f"{outfile_base}.csv"
+    content = render_results(rows, outfile_format)
+    with open(path, 'w') as f:
+        f.write(content + '\n')
+    return path
+
+
 # Helper function to add a hyperlink to a paragraph
 def add_hyperlink(paragraph, url, text):
     part = paragraph.part
@@ -480,6 +560,7 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', word=False, ind
     log.info(f'WordPress API endpoint: {api_posts_url}')
 
     count = 0
+    results = []
     page = 1
     per_page = min(number, WP_API_MAX_PER_PAGE) if number else WP_API_MAX_PER_PAGE
     consecutive_duplicates = 0
@@ -489,7 +570,7 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', word=False, ind
             posts, total_pages = fetch_wp_posts_page(api_posts_url, headers, page=page, per_page=per_page)
         except requests.RequestException:
             log.error(f"Failed to fetch WordPress API page: {api_posts_url} (page {page})")
-            return
+            return results
 
         if not posts:
             log.warning("No posts returned by WordPress API.")
@@ -497,7 +578,7 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', word=False, ind
 
         for post in posts:
             if number and count >= number:
-                return
+                return results
 
             post_url = post.get('link') or post.get('guid', {}).get('rendered')
             if post_url and post_url in seen_urls:
@@ -528,13 +609,20 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', word=False, ind
                 consecutive_duplicates += 1
                 if consecutive_duplicates >= NUM_DUPLICATES:
                     log.info(f"Found {NUM_DUPLICATES} filename-based duplicates in a row. Stopping early.")
-                    return
+                    return results
                 continue
             else:
                 consecutive_duplicates = 0
 
-            save_text_file(post_title, publication_date, content_text, post_url or '', outdir, filename_with_date)
-            save_word_file(post_title, publication_date, content_text, outdir, filename_with_date, word, log, post_url or '')
+            text_path = save_text_file(post_title, publication_date, content_text, post_url or '', outdir, filename_with_date)
+            docx_path = save_word_file(post_title, publication_date, content_text, outdir, filename_with_date, word, log, post_url or '')
+            results.append({
+                'title': post_title,
+                'date': publication_date,
+                'url': post_url or '',
+                'text_path': text_path,
+                'docx_path': docx_path or ''
+            })
 
             if post_url:
                 with open(seen_urls_path, 'a') as f:
@@ -546,6 +634,7 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', word=False, ind
             log.info('No more API pages to process.')
             break
         page += 1
+    return results
 
 def extract_date_from_filename(filename):
     """
@@ -686,9 +775,15 @@ def handle_args():
         nargs='+',
         help='One or more input dirs for file concat (space-separated)')
     parser.add_argument(
-        '--outfile', 
-        default='all_files', 
-        help='Concat file name [default: all_files]')    
+        '--outfile',
+        nargs='?',
+        const='',
+        help='Output file base name (defaults to out.<format> if omitted)')    
+    parser.add_argument(
+        '--outfile-format',
+        choices=['csv', 'json'],
+        default='csv',
+        help='Output format for results file [default: csv]')
     parser.add_argument(
         '--word',
         action='store_true',
@@ -777,6 +872,8 @@ def main():
     args = handle_args()
     # Build initial list of directories to check for existing posts
     indir_list = args.indir or []
+    results_outfile = args.outfile or f"out.{args.outfile_format}"
+    results_rows = []
     if args.get_plugins:
         if not args.wp_username or not args.wp_app_password:
             log.error('XXX Missing WP credentials for --get-plugins')
@@ -788,16 +885,23 @@ def main():
         plugins = fetch_wp_plugins(args.url, headers)
         if plugins is None:
             sys.exit(1)
-        print("name,status,version,plugin")
         for plugin in plugins:
-            name = (plugin.get('name') or '').replace(',', ' ')
-            status = plugin.get('status') or ''
-            version = plugin.get('version') or ''
-            plugin_file = plugin.get('plugin') or ''
-            print(f"{name},{status},{version},{plugin_file}")
+            results_rows.append({
+                'operation': 'get-plugins',
+                'name': (plugin.get('name') or ''),
+                'status': plugin.get('status') or '',
+                'version': plugin.get('version') or '',
+                'plugin': plugin.get('plugin') or ''
+            })
+        print(render_ascii_table(results_rows))
     # Download, using existing indices from all provided indir_list
     if args.download:
-        download_blog_posts_wp_api(args.url, args.number, args.outdir, args.word, indir_list)
+        download_results = download_blog_posts_wp_api(args.url, args.number, args.outdir, args.word, indir_list)
+        for row in (download_results or []):
+            row['operation'] = 'download'
+            results_rows.append(row)
+        if download_results:
+            print(render_ascii_table(download_results))
         # After downloading into outdir, include it for concat
         indir_list = indir_list + [args.outdir]
     # Concatenate from all directories (original and newly downloaded)
@@ -805,6 +909,10 @@ def main():
         concatenate_txt_files(indir_list, args.outfile, args.number)
         if args.word:
             concatenate_word_documents(indir_list, args.outfile, args.number)
+    if results_rows:
+        out_path = write_results(results_outfile, args.outfile_format, results_rows)
+        if out_path:
+            log.info(f'Wrote results file: {out_path}')
 
 if __name__ == '__main__':
     main()

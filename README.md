@@ -17,7 +17,10 @@ Args:
 - `--number` Number of posts to download
 - `--outdir` Directory to save posts (default: `posts`)
 - `--indir` One or more input dirs for concat (space‑separated)
-- `--outfile` Concat output file name (default: `all_files`)
+- `--outfile` Output file base name (defaults to `out.<format>` if omitted)
+- `--outfile-format` Results output format: `csv` or `json` (default: `csv`)
+
+Results from `--get-plugins` or `--download` are written to a file and also printed to stdout as an ASCII table. If `--outfile` is omitted, the default is `out.<format>`.
 - `--word` Save Word documents in addition to text
 - `--download` Download posts
 - `--concat` Concatenate files
@@ -36,12 +39,13 @@ Examples:
   ```bash
   python3 wp_utilities.py --download --url https://johnmaconline.com --outdir posts --concat --outfile all_files
   ```
-- Get plugins (requires credentials):
+- Get plugins (requires credentials) and save results:
   ```bash
   export WP_USERNAME="your_wp_user"
   export WP_APP_PASSWORD="xxxx xxxx xxxx xxxx xxxx"
-  python3 wp_utilities.py --get-plugins --url https://johnmaconline.com
+  python3 wp_utilities.py --get-plugins --url https://johnmaconline.com --outfile plugins --outfile-format csv
   ```
+  This writes `plugins.csv` and also prints to stdout.
 
 ### `categorize_wp_posts.py`
 Uses OpenAI to decide if posts should be tagged with a target category and additively updates categories.
