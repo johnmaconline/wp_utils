@@ -26,6 +26,11 @@ Results from `--get-plugins`, `--get-posts`, or any other `--get-*` operation ar
 - `--post-state` Post state to fetch: published, scheduled, or draft [default: published]
 - `--with-meta` Save per-post metadata JSON alongside downloaded posts
 - `--get-posts` Download posts
+- `--schedule-post` Schedule a post using markdown content + metadata JSON
+- `--content-md` Markdown file path for `--schedule-post` (use `-` for stdin)
+- `--meta-json` Metadata JSON file path for `--schedule-post`
+- `--dry-run` Show planned changes without creating a post (used with `--schedule-post`)
+- `--preview` Print the final scheduled post payload (used with `--schedule-post`)
 - `--export-site` Export site data: all, all-no-media, or comma-separated list (posts,pages,media,comments,users,categories,tags,taxonomies,types,statuses,settings,menus,plugins)
 - `--incremental` For `--export-site`, append only new items to JSONL outputs
 - `--list-posts` Print posts via WP REST API
@@ -86,6 +91,38 @@ Examples:
   python3 wp_utilities.py --export-site all --url https://johnmaconline.com
   ```
   Note: exporting plugins/users/settings may require WP credentials.
+- Schedule a post from markdown + metadata:
+  ```bash
+  export WP_USERNAME="your_wp_user"
+  export WP_APP_PASSWORD="xxxx xxxx xxxx xxxx xxxx"
+  python3 wp_utilities.py --schedule-post --url https://johnmaconline.com \
+    --content-md ./draft.md \
+    --meta-json ./meta.json \
+    --dry-run
+  ```
+  Preview payload (no post created):
+  ```bash
+  python3 wp_utilities.py --schedule-post --url https://johnmaconline.com \
+    --content-md ./draft.md \
+    --meta-json ./meta.json \
+    --dry-run \
+    --preview
+  ```
+  Notes:
+  - Categories are resolved by name and must already exist.
+  - `The250` is always added automatically.
+  - Tags are optional and resolved by name if provided.
+  - If `slug` is omitted, it is auto-generated from the title (lowercase, words joined by `-`).
+  Metadata JSON format:
+  ```json
+  {
+    "title": "My Post Title",
+    "categories": ["AI"],
+    "tags": ["workflow", "automation"],
+    "excerpt": "Short summary shown in listings",
+    "slug": "my-post-title"
+  }
+  ```
 - Export everything but media binaries (metadata only):
   ```bash
   python3 wp_utilities.py --export-site all-no-media --url https://johnmaconline.com

@@ -18,14 +18,16 @@ import logging
 import sys
 import os
 import json
+import mimetypes
 from datetime import date
 from docx import Document
 from docx.shared import Pt
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from urllib.parse import urlparse, unquote
+from zoneinfo import ZoneInfo
 
 # ****************************************************************************************
 # Global data and configuration
@@ -69,6 +71,7 @@ EXPORT_RESOURCES = {
     'menus',
     'plugins',
 }
+DEFAULT_TIMEZONE = 'America/New_York'
 
 # ****************************************************************************************
 # Exceptions
@@ -1042,6 +1045,192 @@ def export_site(url, headers, export_items, outdir, incremental, download_media)
     log.info(f'+  Wrote manifest: {manifest_path}')
     return export_summary
 
+
+def read_markdown_content(path):
+    if path == '-':
+        return sys.stdin.read()
+    with open(path, 'r') as file:
+        return file.read()
+
+
+def load_meta_json(path):
+    with open(path, 'r') as file:
+        data = json.load(file)
+    if not isinstance(data, dict):
+        raise ValueError('Metadata JSON must be an object.')
+    return data
+
+
+def resolve_term_ids(url, headers, endpoint, names):
+    ids = []
+    for name in names:
+        params = {'search': name}
+        data = fetch_wp_endpoint(url, endpoint, headers, params=params)
+        if not isinstance(data, list):
+            raise ValueError(f'Failed to fetch {endpoint} for {name}')
+        matches = []
+        for item in data:
+            if (item.get('name') or '').lower() == name.lower():
+                matches.append(item)
+        if not matches:
+            raise ValueError(f'No {endpoint} found for name: {name}')
+        ids.append(matches[0].get('id'))
+    return ids
+
+
+def upload_media_and_replace(markdown_text, base_dir, url, headers):
+    image_pattern = re.compile(r'!\[[^\]]*]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+    matches = list(image_pattern.finditer(markdown_text))
+    if not matches:
+        return markdown_text, []
+    uploads = []
+    updated = markdown_text
+    media_url = f"{build_wp_api_base(url).rstrip('/')}/wp-json/wp/v2/media"
+    for match in matches:
+        raw_path = match.group(1)
+        if raw_path.startswith('http://') or raw_path.startswith('https://') or raw_path.startswith('data:'):
+            continue
+        local_path = raw_path
+        if not os.path.isabs(local_path):
+            local_path = os.path.join(base_dir, local_path)
+        if not os.path.exists(local_path):
+            raise ValueError(f"Image file not found: {local_path}")
+        filename = os.path.basename(local_path)
+        mime_type, _ = mimetypes.guess_type(local_path)
+        mime_type = mime_type or 'application/octet-stream'
+        with open(local_path, 'rb') as file:
+            response = requests.post(
+                media_url,
+                headers=headers,
+                files={'file': (filename, file, mime_type)}
+            )
+        if response.status_code >= 400:
+            raise ValueError(f"Media upload failed: {response.status_code} {response.text}")
+        media_item = response.json()
+        source_url = media_item.get('source_url') or ''
+        if not source_url:
+            raise ValueError('Media upload succeeded but no source_url returned.')
+        updated = updated.replace(raw_path, source_url)
+        uploads.append({'id': media_item.get('id'), 'source_url': source_url, 'file': local_path})
+    return updated, uploads
+
+
+def find_local_markdown_images(markdown_text, base_dir):
+    image_pattern = re.compile(r'!\[[^\]]*]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+    local_paths = []
+    for match in image_pattern.finditer(markdown_text):
+        raw_path = match.group(1)
+        if raw_path.startswith('http://') or raw_path.startswith('https://') or raw_path.startswith('data:'):
+            continue
+        local_path = raw_path
+        if not os.path.isabs(local_path):
+            local_path = os.path.join(base_dir, local_path)
+        local_paths.append(local_path)
+    return local_paths
+
+
+def fetch_latest_scheduled_date(url, headers, tz_name):
+    posts_url = build_wp_api_posts_url(url)
+    params = {
+        'status': 'future',
+        'per_page': 1,
+        'orderby': 'date',
+        'order': 'desc'
+    }
+    response = requests.get(posts_url, headers=headers, params=params)
+    if response.status_code >= 400:
+        raise ValueError(f"Failed to fetch scheduled posts: {response.status_code} {response.text}")
+    data = response.json()
+    if not isinstance(data, list) or not data:
+        return None
+    latest = data[0]
+    date_str = latest.get('date')
+    if not date_str:
+        return None
+    dt = datetime.fromisoformat(date_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(tz_name))
+    return dt
+
+
+def build_schedule_payload(url, headers, content_md, meta, tz_name=DEFAULT_TIMEZONE):
+    title = meta.get('title') or meta.get('post_title')
+    if not title:
+        raise ValueError('Metadata JSON must include title.')
+    categories = meta.get('categories') or []
+    if isinstance(categories, str):
+        categories = [categories]
+    if not isinstance(categories, list):
+        raise ValueError('categories must be a list of category names.')
+    categories = [c for c in categories if c]
+    if 'The250' not in categories:
+        categories.append('The250')
+    seen = set()
+    deduped = []
+    for name in categories:
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(name)
+    categories = deduped
+    category_ids = resolve_term_ids(url, headers, 'categories', categories)
+    tags = meta.get('tags') or []
+    if isinstance(tags, str):
+        tags = [tags]
+    if tags:
+        if not isinstance(tags, list):
+            raise ValueError('tags must be a list of tag names.')
+        tag_ids = resolve_term_ids(url, headers, 'tags', tags)
+    else:
+        tag_ids = []
+
+    latest_dt = fetch_latest_scheduled_date(url, headers, tz_name)
+    now_local = datetime.now(ZoneInfo(tz_name))
+    base_date = latest_dt.date() if latest_dt else now_local.date()
+    schedule_date = base_date + timedelta(days=1)
+    schedule_dt = datetime.combine(schedule_date, time(8, 44), tzinfo=ZoneInfo(tz_name))
+
+    payload = {
+        'title': title,
+        'content': content_md,
+        'status': 'future',
+        'date': schedule_dt.strftime('%Y-%m-%dT%H:%M:%S'),
+        'categories': category_ids
+    }
+    if tag_ids:
+        payload['tags'] = tag_ids
+    if meta.get('excerpt'):
+        payload['excerpt'] = meta.get('excerpt')
+    slug = (meta.get('slug') or '').strip()
+    if not slug:
+        slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+    if slug:
+        payload['slug'] = slug
+
+    return payload, schedule_dt
+
+
+def schedule_post_wp_api(url, headers, content_md, meta, dry_run=False, preview=False, tz_name=DEFAULT_TIMEZONE):
+    payload, schedule_dt = build_schedule_payload(url, headers, content_md, meta, tz_name)
+    if dry_run:
+        return {
+            'scheduled_for': schedule_dt.isoformat(),
+            'payload': payload
+        }
+    posts_url = build_wp_api_posts_url(url)
+    response = requests.post(posts_url, headers=headers, json=payload)
+    if response.status_code >= 400:
+        raise ValueError(f"Post schedule failed: {response.status_code} {response.text}")
+    post = response.json()
+    if preview:
+        return {
+            'post': post,
+            'scheduled_for': schedule_dt.isoformat(),
+            'payload': payload
+        }
+    return post
+
 def fetch_wp_posts_page(api_posts_url, headers, page=1, per_page=WP_API_MAX_PER_PAGE, date_range=None, status=None):
     params = {
         'per_page': per_page,
@@ -1369,6 +1558,24 @@ def handle_args():
         action='store_true',
         help='Download posts via the REST API.')
     parser.add_argument(
+        '--schedule-post',
+        action='store_true',
+        help='Schedule a post via the REST API using markdown content and metadata JSON.')
+    parser.add_argument(
+        '--content-md',
+        help='Path to markdown content file (use - for stdin) for --schedule-post')
+    parser.add_argument(
+        '--meta-json',
+        help='Path to metadata JSON file for --schedule-post')
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Show planned changes without making updates (used with --schedule-post).')
+    parser.add_argument(
+        '--preview',
+        action='store_true',
+        help='Print the final scheduled post payload (used with --schedule-post).')
+    parser.add_argument(
         '--export-site',
         help='Export site data via REST API: all, all-no-media, or comma-separated list (posts,pages,media,comments,users,categories,tags,taxonomies,types,statuses,settings,menus,plugins)')
     parser.add_argument(
@@ -1492,6 +1699,16 @@ def handle_args():
     if args.export_site and not args.url:
         log.error('XXX Must supply a URL for --export-site')
         sys.exit(1)
+    if args.schedule_post:
+        if not args.url:
+            log.error('XXX Must supply a URL for --schedule-post')
+            sys.exit(1)
+        if not args.content_md or not args.meta_json:
+            log.error('XXX Must supply --content-md and --meta-json for --schedule-post')
+            sys.exit(1)
+        if not args.wp_username or not args.wp_app_password:
+            log.error('XXX Missing WP credentials for --schedule-post')
+            sys.exit(1)
     if (args.get_plugins or args.list_posts or args.get_pages or args.get_categories or args.get_tags or
             args.get_users or args.get_user_me or args.get_media or args.get_comments or args.get_types or
             args.get_statuses or args.get_taxonomies or args.get_settings or args.get_themes) and not args.url:
@@ -1515,6 +1732,16 @@ def handle_args():
                 log.info('+  Media binaries: disabled (metadata only)')
         if args.export_site_items.intersection({'users', 'settings'}) and not (args.wp_username and args.wp_app_password):
             log.info('+  Credentials not provided; some export items may fail')
+    if args.schedule_post:
+        log.info('+  Scheduling post via WP API')
+        log.info(f'+  Target URL: {args.url}')
+        log.info(f'+  Content markdown: {args.content_md}')
+        log.info(f'+  Metadata JSON: {args.meta_json}')
+        log.info(f'+  Timezone: {DEFAULT_TIMEZONE}')
+        if args.dry_run:
+            log.info('+  Dry run enabled (no post will be created)')
+        if args.preview:
+            log.info('+  Preview enabled (payload will be printed)')
     if args.get_posts:
         log.info('+  Fetching posts via WP API')
         log.info(f'+  Target URL: {args.url}')
@@ -1562,7 +1789,7 @@ def handle_args():
     results_ops = [
         args.get_posts, args.list_posts, args.get_plugins, args.get_pages, args.get_categories, args.get_tags,
         args.get_users, args.get_user_me, args.get_media, args.get_comments, args.get_types, args.get_statuses,
-        args.get_taxonomies, args.get_settings, args.get_themes
+        args.get_taxonomies, args.get_settings, args.get_themes, args.schedule_post
     ]
     if any(results_ops):
         if not args.get_posts and args.url:
@@ -1570,6 +1797,8 @@ def handle_args():
         actions = []
         if args.get_posts:
             actions.append('get-posts (download)')
+        if args.schedule_post:
+            actions.append('schedule-post')
         if args.list_posts:
             actions.append('list-posts')
         if args.get_plugins:
@@ -1674,6 +1903,71 @@ def main():
             args.incremental,
             args.export_download_media
         )
+    if args.schedule_post:
+        try:
+            meta = load_meta_json(args.meta_json)
+            content_md = read_markdown_content(args.content_md)
+            base_dir = os.path.dirname(args.content_md) if args.content_md != '-' else os.getcwd()
+            uploads = []
+            if args.dry_run:
+                local_images = find_local_markdown_images(content_md, base_dir)
+                missing = [path for path in local_images if not os.path.exists(path)]
+                if missing:
+                    raise ValueError(f"Missing local images: {', '.join(missing)}")
+                if local_images:
+                    log.info(f'+  Dry run: would upload {len(local_images)} image(s)')
+                result = schedule_post_wp_api(
+                    args.url,
+                    headers,
+                    content_md,
+                    meta,
+                    dry_run=True,
+                    preview=args.preview,
+                    tz_name=DEFAULT_TIMEZONE
+                )
+                if args.preview:
+                    print(json.dumps(result.get('payload', {}), indent=2))
+                scheduled_for = result.get('scheduled_for')
+                post_id = ''
+                link = ''
+            else:
+                content_md, uploads = upload_media_and_replace(content_md, base_dir, args.url, headers)
+                if uploads:
+                    log.info(f'+  Uploaded {len(uploads)} image(s)')
+                result = schedule_post_wp_api(
+                    args.url,
+                    headers,
+                    content_md,
+                    meta,
+                    dry_run=False,
+                    preview=args.preview,
+                    tz_name=DEFAULT_TIMEZONE
+                )
+                if args.preview:
+                    print(json.dumps(result.get('payload', {}), indent=2))
+                    post = result.get('post', {})
+                else:
+                    post = result
+                scheduled_for = post.get('date') or result.get('scheduled_for')
+                post_id = post.get('id')
+                link = post.get('link') or ''
+            title = meta.get('title') or meta.get('post_title') or ''
+            row = {
+                'operation': 'schedule-post',
+                'title': title,
+                'scheduled_for': scheduled_for or '',
+                'status': 'future',
+                'post_id': post_id or '',
+                'link': link,
+                'media_uploaded': len(uploads),
+                'dry_run': str(bool(args.dry_run))
+            }
+            results_rows.append(row)
+            op_counts['schedule-post'] = 1
+            print(render_ascii_table([row]))
+        except ValueError as exc:
+            log.error(f'XXX {exc}')
+            sys.exit(1)
     if args.get_plugins:
         if not args.wp_username or not args.wp_app_password:
             log.error('XXX Missing WP credentials for --get-plugins')
