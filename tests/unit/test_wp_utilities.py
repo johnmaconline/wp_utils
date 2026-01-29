@@ -39,6 +39,22 @@ def test_build_wp_api_base_and_plugins_url():
     )
 
 
+def test_normalize_users_includes_permissions():
+    data = [{
+        'id': 1,
+        'name': 'User One',
+        'slug': 'user-one',
+        'link': 'https://example.com/author/user-one/',
+        'registered_date': '2026-01-01T00:00:00',
+        'roles': ['administrator'],
+        'capabilities': {'edit_posts': True, 'delete_posts': False}
+    }]
+    rows = wp_utilities.normalize_wp_rows('get-users', data)
+    assert rows[0]['registered_date'] == '2026-01-01T00:00:00'
+    assert rows[0]['roles'] == 'administrator'
+    assert 'edit_posts' in rows[0]['capabilities']
+
+
 def test_format_wp_api_date():
     assert wp_utilities.format_wp_api_date("2026-01-27T08:44:00") == "2026-01-27"
     assert wp_utilities.format_wp_api_date("2026-01-27T13:44:00Z") == "2026-01-27"

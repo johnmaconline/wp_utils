@@ -304,12 +304,13 @@ def is_duplicate_filename(text_filename, docx_filename, existing_txt_files, exis
     return text_filename in existing_txt_files or docx_filename in existing_docx_files
 
 # Helper: save text file
-def save_text_file(post_title, publication_date, content_text, post_url, outdir, filename_with_date):
+def save_text_file(post_title, publication_date, content_text, post_url, outdir, filename_with_date, extension='txt'):
     """
     Save the blog post as a Markdown text file.
     """
     md_text = f"# {post_title}\nDate: {publication_date}\n\n{content_text}"
-    text_filepath = os.path.join(outdir, filename_with_date + '.txt')
+    ext = extension.lstrip('.')
+    text_filepath = os.path.join(outdir, f"{filename_with_date}.{ext}")
     with open(text_filepath, 'w') as file:
         file.write(md_text + f"\nOriginal post: {post_url}\n")
     log.info(f'Article saved as: {text_filepath}')
@@ -331,6 +332,15 @@ def save_word_file(post_title, publication_date, content_text, outdir, filename_
     return None
 
 
+def save_meta_file(post_data, outdir, filename_with_date):
+    meta_path = os.path.join(outdir, f"{filename_with_date}.meta.json")
+    with open(meta_path, 'w') as file:
+        import json
+        json.dump(post_data, file, indent=2)
+    log.info(f'Metadata saved as: {meta_path}')
+    return meta_path
+
+
 def _select_columns(rows):
     if not rows:
         return []
@@ -340,7 +350,7 @@ def _select_columns(rows):
         op = next(iter(ops))
         op_map = {
             'get-plugins': ['name', 'operation', 'plugin', 'status', 'version'],
-            'download': ['operation', 'title', 'date', 'url', 'text_path', 'docx_path'],
+            'download': ['operation', 'title', 'date', 'url', 'text_path', 'md_path', 'docx_path', 'meta_path'],
             'get-posts': ['id', 'title', 'status', 'date', 'link'],
             'get-pages': ['id', 'title', 'status', 'date', 'link'],
             'get-categories': ['id', 'name', 'slug', 'count'],
@@ -710,7 +720,7 @@ def fetch_wp_posts_page(api_posts_url, headers, page=1, per_page=WP_API_MAX_PER_
     posts = response.json()
     total_pages = int(response.headers.get('X-WP-TotalPages', 1))
     return posts, total_pages
-def download_blog_posts_wp_api(url, number=None, outdir='posts', word=False, indir=None):
+def download_blog_posts_wp_api(url, number=None, outdir='posts', formats=None, indir=None, with_meta=False):
     '''
     Download blog posts using the WordPress REST API instead of scraping HTML pages.
     '''
@@ -743,6 +753,7 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', word=False, ind
     api_posts_url = build_wp_api_posts_url(url)
     log.info(f'WordPress API endpoint: {api_posts_url}')
 
+    formats = formats or ['txt']
     count = 0
     results = []
     page = 1
@@ -798,14 +809,26 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', word=False, ind
             else:
                 consecutive_duplicates = 0
 
-            text_path = save_text_file(post_title, publication_date, content_text, post_url or '', outdir, filename_with_date)
-            docx_path = save_word_file(post_title, publication_date, content_text, outdir, filename_with_date, word, log, post_url or '')
+            text_path = None
+            md_path = None
+            docx_path = None
+            if 'txt' in formats:
+                text_path = save_text_file(post_title, publication_date, content_text, post_url or '', outdir, filename_with_date, 'txt')
+            if 'md' in formats:
+                md_path = save_text_file(post_title, publication_date, content_text, post_url or '', outdir, filename_with_date, 'md')
+            if 'word' in formats:
+                docx_path = save_word_file(post_title, publication_date, content_text, outdir, filename_with_date, True, log, post_url or '')
+            meta_path = ''
+            if with_meta:
+                meta_path = save_meta_file(post, outdir, filename_with_date)
             results.append({
                 'title': post_title,
                 'date': publication_date,
                 'url': post_url or '',
-                'text_path': text_path,
-                'docx_path': docx_path or ''
+                'text_path': text_path or '',
+                'md_path': md_path or '',
+                'docx_path': docx_path or '',
+                'meta_path': meta_path
             })
 
             if post_url:
@@ -835,7 +858,7 @@ def extract_date_from_filename(filename):
         log.warning(f"Invalid date format in filename: {filename}")
     return None
             
-def concatenate_txt_files(indir_list, outfile, num_files):
+def concatenate_text_files(indir_list, outfile, num_files, extension):
     '''
     Concatenate text files in the specified directories, sorted by date (newest first).
     Assumes that a function extract_date_from_filename(filename) is defined externally.
@@ -845,7 +868,7 @@ def concatenate_txt_files(indir_list, outfile, num_files):
         if not os.path.isdir(idir):
             continue
         for file in os.listdir(idir):
-            if file.endswith('.txt'):
+            if file.endswith(f'.{extension}'):
                 file_date = extract_date_from_filename(file)
                 if file_date:
                     files_with_dates.append((os.path.join(idir, file), file_date))
@@ -856,7 +879,7 @@ def concatenate_txt_files(indir_list, outfile, num_files):
     files_with_dates.sort(key=lambda x: x[1], reverse=True)
 
     # Process files in sorted order
-    with open(f'{outfile}.txt', 'w') as out_file:
+    with open(f'{outfile}.{extension}', 'w') as out_file:
         processed_files = 0
         for file_path, _ in files_with_dates:
             with open(file_path, 'r') as in_file:
@@ -868,7 +891,7 @@ def concatenate_txt_files(indir_list, outfile, num_files):
                 if num_files is not None and processed_files >= num_files:
                     break
 
-    log.info(f'Concatenated document saved as: {outfile}.txt')
+    log.info(f'Concatenated document saved as: {outfile}.{extension}')
 
 
 def concatenate_word_documents(indir_list, outfile, num_files=None):
@@ -969,9 +992,11 @@ def handle_args():
         default='csv',
         help='Output format for results file [default: csv]')
     parser.add_argument(
-        '--word',
-        action='store_true',
-        help='Download blog posts as formatted Word documents instead of text files.')
+        '--format',
+        nargs='+',
+        choices=['txt', 'md', 'word'],
+        default=['txt'],
+        help='Output formats for downloaded posts [default: txt]')
     parser.add_argument(
         '--download',
         action='store_true',
@@ -1041,6 +1066,10 @@ def handle_args():
         default=os.getenv('WP_APP_PASSWORD'),
         help='WordPress application password (or set WP_APP_PASSWORD env var)')
     parser.add_argument(
+        '--with-meta',
+        action='store_true',
+        help='Save per-post metadata JSON alongside downloaded posts.')
+    parser.add_argument(
         '--concat',
         action='store_true',
         help='Concat files.')
@@ -1088,6 +1117,9 @@ def handle_args():
         log.info(f'+  Target URL: {args.url}')
         log.info(f'+  Number of posts to download: {"All" if args.number is None else args.number}')
         log.info(f'+  Output directory: {args.outdir}')
+        log.info(f'+  Formats: {args.format}')
+        if args.with_meta:
+            log.info('+  Including metadata')
     if args.get_plugins:
         log.info('+  Fetching plugin list via WP API')
     if args.get_posts:
@@ -1253,7 +1285,7 @@ def main():
             print(render_ascii_table(rows))
     # Download, using existing indices from all provided indir_list
     if args.download:
-        download_results = download_blog_posts_wp_api(args.url, args.number, args.outdir, args.word, indir_list)
+        download_results = download_blog_posts_wp_api(args.url, args.number, args.outdir, args.format, indir_list, args.with_meta)
         for row in (download_results or []):
             row['operation'] = 'download'
             results_rows.append(row)
@@ -1263,8 +1295,11 @@ def main():
         indir_list = indir_list + [args.outdir]
     # Concatenate from all directories (original and newly downloaded)
     if args.concat:
-        concatenate_txt_files(indir_list, args.outfile, args.number)
-        if args.word:
+        if 'txt' in args.format:
+            concatenate_text_files(indir_list, args.outfile, args.number, 'txt')
+        if 'md' in args.format:
+            concatenate_text_files(indir_list, args.outfile, args.number, 'md')
+        if 'word' in args.format:
             concatenate_word_documents(indir_list, args.outfile, args.number)
     if results_rows:
         out_path = write_results(results_outfile, args.outfile_format, results_rows)
