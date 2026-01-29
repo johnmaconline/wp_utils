@@ -22,6 +22,8 @@ Args:
 
 Results from `--get-plugins`, `--get-posts`, or any other `--get-*` operation are written to a file and also printed to stdout as an ASCII table. If `--outfile` is omitted, the default is `out.<format>`.
 - `--format` Output formats for downloaded posts (supports multiple) [default: txt]
+- `--date` Date range filter for posts: today, week, month, year, all, or MM-DD-YYYY:MM-DD-YYYY (overrides --number)
+- `--post-state` Post state to fetch: published, scheduled, or draft [default: published]
 - `--with-meta` Save per-post metadata JSON alongside downloaded posts
 - `--get-posts` Download posts
 - `--list-posts` Print posts via WP REST API
@@ -57,6 +59,10 @@ Examples:
 - Download as txt + md + word and include metadata:
   ```bash
   python3 wp_utilities.py --get-posts --url https://johnmaconline.com --outdir posts --format txt md word --with-meta
+  ```
+- Download posts from the last week:
+  ```bash
+  python3 wp_utilities.py --get-posts --url https://johnmaconline.com --date week --format md
   ```
 - List posts (no downloads):
   ```bash

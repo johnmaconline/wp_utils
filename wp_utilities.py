@@ -23,7 +23,7 @@ from docx.shared import Pt
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse, unquote
 
 # ****************************************************************************************
@@ -46,6 +46,11 @@ log.addHandler(fh)
 NUM_DUPLICATES = 5
 # WordPress API max per_page is typically 100
 WP_API_MAX_PER_PAGE = 100
+# ASCII table rendering
+TABLE_MAX_WIDTH = 120
+TABLE_MIN_WIDTH = 4
+TABLE_MIN_WIDTH_TITLE = 20
+TABLE_MIN_WIDTH_DATE = 10
 
 # ****************************************************************************************
 # Exceptions
@@ -346,15 +351,16 @@ def _select_columns(rows):
         return []
     keys = set().union(*(row.keys() for row in rows))
     ops = {row.get('operation') for row in rows}
+    download_keys = {'text_path', 'md_path', 'docx_path', 'meta_path'}
     if len(ops) == 1:
         op = next(iter(ops))
         op_map = {
             'get-plugins': ['name', 'operation', 'plugin', 'status', 'version'],
-            'get-posts': ['operation', 'title', 'date', 'url', 'text_path', 'md_path', 'docx_path', 'meta_path'],
+            'get-posts': ['title', 'date', 'url', 'txt', 'md', 'docx', 'meta'],
             'list-posts': ['id', 'title', 'status', 'date', 'link'],
             'get-pages': ['id', 'title', 'status', 'date', 'link'],
-            'get-categories': ['id', 'name', 'slug', 'count'],
-            'get-tags': ['id', 'name', 'slug', 'count'],
+            'get-categories': ['id', 'name', 'slug', 'count', 'parent', 'description'],
+            'get-tags': ['id', 'name', 'slug', 'count', 'description'],
             'get-users': ['id', 'name', 'registered_date', 'roles', 'capabilities'],
             'get-user-me': ['id', 'name', 'registered_date', 'roles', 'capabilities'],
             'get-media': ['id', 'title', 'media_type', 'mime_type', 'link'],
@@ -365,25 +371,38 @@ def _select_columns(rows):
             'get-settings': ['key', 'value'],
             'get-themes': ['stylesheet', 'name', 'version', 'status'],
         }
-        if op in op_map and set(op_map[op]).issubset(keys):
+        if op in op_map:
             return op_map[op]
     if keys.issuperset({'name', 'operation', 'plugin', 'status', 'version'}):
         return ['name', 'operation', 'plugin', 'status', 'version']
-    if keys.issuperset({'operation', 'title', 'date', 'url', 'text_path', 'docx_path'}):
-        return ['operation', 'title', 'date', 'url', 'text_path', 'docx_path']
+    if keys.issuperset({'title', 'date', 'url'}) and keys.intersection(download_keys):
+        return ['title', 'date', 'url', 'txt', 'md', 'docx', 'meta']
     return sorted(keys)
 
 
-def render_ascii_table(rows):
+def render_ascii_table(rows, max_width=TABLE_MAX_WIDTH):
     if not rows:
         return ''
     columns = _select_columns(rows)
     if not columns:
         return ''
-    def _format_value(col, value):
+    def _format_value(col, value, row):
         if value is None:
             value = ''
+        if col in {'txt', 'md', 'docx', 'meta'}:
+            key_map = {
+                'txt': 'text_path',
+                'md': 'md_path',
+                'docx': 'docx_path',
+                'meta': 'meta_path',
+            }
+            value = 'X' if row.get(key_map[col]) else ''
+            return value
         value = str(value)
+        if col == 'url' and (row.get('operation') == 'get-posts' or any(k in row for k in ('text_path', 'md_path', 'docx_path', 'meta_path'))):
+            parsed = urlparse(value)
+            slug = parsed.path.strip('/')
+            return slug or value
         if col == 'registered_date' and 'T' in value:
             value = value.split('T', 1)[0]
         return value
@@ -391,7 +410,7 @@ def render_ascii_table(rows):
     widths = {col: len(col) for col in columns}
     for row in rows:
         for col in columns:
-            val = _format_value(col, row.get(col, ''))
+            val = _format_value(col, row.get(col, ''), row)
             widths[col] = max(widths[col], len(val))
 
     def _truncate(value, width):
@@ -401,25 +420,33 @@ def render_ascii_table(rows):
             return value[:width]
         return value[:width - 3] + '...'
 
-    def _format_row(values):
+    def _format_row(values, header=False):
         parts = []
         for col in columns:
-            raw = _format_value(col, values.get(col, '') if values else '')
+            if header:
+                raw = col
+            else:
+                raw = _format_value(col, values.get(col, '') if values else '', values or {})
             parts.append(_truncate(raw, widths[col]).ljust(widths[col]))
         return "| " + " | ".join(parts) + " |"
 
     def _line_length():
         return len(_format_row({col: col for col in columns}))
 
-    min_width = 4
-    while _line_length() > 80:
-        widest = max(columns, key=lambda c: widths[c])
-        if widths[widest] <= min_width:
+    min_widths = {col: TABLE_MIN_WIDTH for col in columns}
+    if 'title' in min_widths:
+        min_widths['title'] = TABLE_MIN_WIDTH_TITLE
+    if 'date' in min_widths:
+        min_widths['date'] = TABLE_MIN_WIDTH_DATE
+    while _line_length() > max_width:
+        shrinkable = [c for c in columns if widths[c] > min_widths.get(c, 4)]
+        if not shrinkable:
             break
+        widest = max(shrinkable, key=lambda c: widths[c])
         widths[widest] -= 1
 
     border = "+-" + "-+-".join("-" * widths[col] for col in columns) + "-+"
-    header = _format_row({col: col for col in columns})
+    header = _format_row({}, header=True)
     lines = [border, header, border]
     for row in rows:
         lines.append(_format_row(row))
@@ -705,22 +732,64 @@ def format_wp_api_date(date_str):
         return dt.strftime('%Y-%m-%d')
     except ValueError as e:
         log.error(f"Error parsing API date '{date_str}': {e}")
-        return "unknown-date"
+    return "unknown-date"
 
-def fetch_wp_posts_page(api_posts_url, headers, page=1, per_page=WP_API_MAX_PER_PAGE):
+def parse_date_range(date_arg):
+    if not date_arg:
+        return None, None
+    today = datetime.today().date()
+    arg = date_arg.strip().lower()
+    if arg == 'all':
+        return None, None
+    if arg == 'today':
+        start = end = today
+    elif arg == 'week':
+        start = today - timedelta(days=7)
+        end = today
+    elif arg == 'month':
+        start = today - timedelta(days=30)
+        end = today
+    elif arg == 'year':
+        start = today - timedelta(days=365)
+        end = today
+    else:
+        try:
+            start_str, end_str = date_arg.split(':', 1)
+            start = datetime.strptime(start_str, "%m-%d-%Y").date()
+            end = datetime.strptime(end_str, "%m-%d-%Y").date()
+        except ValueError as exc:
+            raise ValueError(f"Invalid --date value: {date_arg}") from exc
+    if start > end:
+        start, end = end, start
+    return start, end
+
+def add_date_range_params(params, date_range):
+    if not date_range or not date_range[0] or not date_range[1]:
+        return params
+    start, end = date_range
+    params = dict(params)
+    params['after'] = start.strftime('%Y-%m-%dT00:00:00')
+    params['before'] = end.strftime('%Y-%m-%dT23:59:59')
+    return params
+
+def fetch_wp_posts_page(api_posts_url, headers, page=1, per_page=WP_API_MAX_PER_PAGE, date_range=None, status=None):
     params = {
         'per_page': per_page,
         'page': page,
         'orderby': 'date',
         'order': 'desc',
-        'status': 'publish'
     }
+    if status:
+        params['status'] = status
+    else:
+        params['status'] = 'publish'
+    params = add_date_range_params(params, date_range)
     response = requests.get(api_posts_url, headers=headers, params=params)
     response.raise_for_status()
     posts = response.json()
     total_pages = int(response.headers.get('X-WP-TotalPages', 1))
     return posts, total_pages
-def download_blog_posts_wp_api(url, number=None, outdir='posts', formats=None, indir=None, with_meta=False):
+def download_blog_posts_wp_api(url, number=None, outdir='posts', formats=None, indir=None, with_meta=False, date_range=None, status=None):
     '''
     Download blog posts using the WordPress REST API instead of scraping HTML pages.
     '''
@@ -756,34 +825,50 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', formats=None, i
     formats = formats or ['txt']
     count = 0
     results = []
+    stats = {
+        'scanned': 0,
+        'skipped_seen': 0,
+        'skipped_duplicate': 0,
+        'skipped_other': 0,
+    }
     page = 1
     per_page = min(number, WP_API_MAX_PER_PAGE) if number else WP_API_MAX_PER_PAGE
     consecutive_duplicates = 0
 
     while True:
         try:
-            posts, total_pages = fetch_wp_posts_page(api_posts_url, headers, page=page, per_page=per_page)
+            posts, total_pages = fetch_wp_posts_page(
+                api_posts_url,
+                headers,
+                page=page,
+                per_page=per_page,
+                date_range=date_range,
+                status=status
+            )
         except requests.RequestException:
             log.error(f"Failed to fetch WordPress API page: {api_posts_url} (page {page})")
-            return results
+            return results, stats
 
         if not posts:
             log.warning("No posts returned by WordPress API.")
             break
 
         for post in posts:
+            stats['scanned'] += 1
             if number and count >= number:
-                return results
+                return results, stats
 
             post_url = post.get('link') or post.get('guid', {}).get('rendered')
             if post_url and post_url in seen_urls:
                 log.info(f"Skipping already-seen URL: {post_url}")
+                stats['skipped_seen'] += 1
                 continue
 
             post_title_html = (post.get('title', {}) or {}).get('rendered', '')
             post_title = BeautifulSoup(post_title_html, 'html.parser').get_text().strip()
             if not post_title:
                 log.warning("No title found in API post, skipping...")
+                stats['skipped_other'] += 1
                 continue
 
             publication_date = format_wp_api_date(post.get('date') or post.get('date_gmt'))
@@ -792,6 +877,7 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', formats=None, i
 
             if not content_text:
                 log.warning(f"No content found in {post_title}, skipping...")
+                stats['skipped_other'] += 1
                 continue
 
             sanitized_title = sanitize_filename(post_title)
@@ -802,9 +888,10 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', formats=None, i
             if is_duplicate_filename(text_filename, docx_filename, existing_txt_files, existing_docx_files):
                 log.info(f"Skipping duplicate: {text_filename}")
                 consecutive_duplicates += 1
+                stats['skipped_duplicate'] += 1
                 if consecutive_duplicates >= NUM_DUPLICATES:
                     log.info(f"Found {NUM_DUPLICATES} filename-based duplicates in a row. Stopping early.")
-                    return results
+                    return results, stats
                 continue
             else:
                 consecutive_duplicates = 0
@@ -841,7 +928,7 @@ def download_blog_posts_wp_api(url, number=None, outdir='posts', formats=None, i
             log.info('No more API pages to process.')
             break
         page += 1
-    return results
+    return results, stats
 
 def extract_date_from_filename(filename):
     """
@@ -892,6 +979,7 @@ def concatenate_text_files(indir_list, outfile, num_files, extension):
                     break
 
     log.info(f'Concatenated document saved as: {outfile}.{extension}')
+    return processed_files
 
 
 def concatenate_word_documents(indir_list, outfile, num_files=None):
@@ -959,6 +1047,7 @@ def concatenate_word_documents(indir_list, outfile, num_files=None):
     # Save the concatenated document
     outdoc.save(f'{outfile}.docx')
     log.info(f'Concatenated document saved as: {outfile}.docx')
+    return processed_files
 
     
 # ****************************************************************************************
@@ -997,6 +1086,14 @@ def handle_args():
         choices=['txt', 'md', 'word'],
         default=['txt'],
         help='Output formats for downloaded posts [default: txt]')
+    parser.add_argument(
+        '--date',
+        help='Date range filter: today, week, month, year, all, or MM-DD-YYYY:MM-DD-YYYY (overrides --number)')
+    parser.add_argument(
+        '--post-state',
+        choices=['published', 'scheduled', 'draft'],
+        default='published',
+        help='Post state to fetch [default: published]')
     parser.add_argument(
         '--get-posts',
         action='store_true',
@@ -1103,6 +1200,11 @@ def handle_args():
         else:
             log.error(f'XXX Must supply a URL')
             sys.exit(1)
+    if args.date and args.number:
+        log.info('++ --date provided; ignoring --number')
+    if args.post_state != 'published' and not (args.wp_username and args.wp_app_password):
+        log.error('XXX Non-published post states require WP credentials')
+        sys.exit(1)
     if (args.get_plugins or args.list_posts or args.get_pages or args.get_categories or args.get_tags or
             args.get_users or args.get_user_me or args.get_media or args.get_comments or args.get_types or
             args.get_statuses or args.get_taxonomies or args.get_settings or args.get_themes) and not args.url:
@@ -1114,16 +1216,25 @@ def handle_args():
     log.info(f'+  Python Version: {sys.version.split()[0]}')
     log.info(f'+  Today is: {date.today()}')
     if args.get_posts:
+        log.info('+  Fetching posts via WP API')
         log.info(f'+  Target URL: {args.url}')
-        log.info(f'+  Number of posts to download: {"All" if args.number is None else args.number}')
+        log.info(f'+  Post state: {args.post_state}')
+        if args.date:
+            log.info(f'+  Date range: {args.date}')
+        else:
+            log.info(f'+  Number of posts to download: {"All" if args.number is None else args.number}')
         log.info(f'+  Output directory: {args.outdir}')
         log.info(f'+  Formats: {args.format}')
         if args.with_meta:
-            log.info('+  Including metadata')
+            log.info('+  Downloading metadata')
+        log.info('+  Downloading post content')
     if args.get_plugins:
         log.info('+  Fetching plugin list via WP API')
     if args.list_posts:
         log.info('+  Fetching posts via WP API')
+        if args.date and not args.get_posts:
+            log.info(f'+  Date range: {args.date}')
+        log.info(f'+  Post state: {args.post_state}')
     if args.get_pages:
         log.info('+  Fetching pages via WP API')
     if args.get_categories:
@@ -1148,9 +1259,63 @@ def handle_args():
         log.info('+  Fetching settings via WP API')
     if args.get_themes:
         log.info('+  Fetching themes via WP API')
+    results_ops = [
+        args.get_posts, args.list_posts, args.get_plugins, args.get_pages, args.get_categories, args.get_tags,
+        args.get_users, args.get_user_me, args.get_media, args.get_comments, args.get_types, args.get_statuses,
+        args.get_taxonomies, args.get_settings, args.get_themes
+    ]
+    if any(results_ops):
+        if not args.get_posts and args.url:
+            log.info(f'+  Target URL: {args.url}')
+        actions = []
+        if args.get_posts:
+            actions.append('get-posts (download)')
+        if args.list_posts:
+            actions.append('list-posts')
+        if args.get_plugins:
+            actions.append('get-plugins')
+        if args.get_pages:
+            actions.append('get-pages')
+        if args.get_categories:
+            actions.append('get-categories')
+        if args.get_tags:
+            actions.append('get-tags')
+        if args.get_users:
+            actions.append('get-users')
+        if args.get_user_me:
+            actions.append('get-user-me')
+        if args.get_media:
+            actions.append('get-media')
+        if args.get_comments:
+            actions.append('get-comments')
+        if args.get_types:
+            actions.append('get-types')
+        if args.get_statuses:
+            actions.append('get-statuses')
+        if args.get_taxonomies:
+            actions.append('get-taxonomies')
+        if args.get_settings:
+            actions.append('get-settings')
+        if args.get_themes:
+            actions.append('get-themes')
+        if len(actions) > 1:
+            log.info(f'+  Actions: {", ".join(actions)}')
+
+        results_outfile = args.outfile or f"out.{args.outfile_format}"
+        log.info(f'+  Results summary file: {results_outfile}')
+        log.info(f'+  Results format: {args.outfile_format}')
     if args.concat:
         log.info(f'+  Concatenating files')
         log.info(f'+  Output file: {args.outfile}')
+        concat_outputs = []
+        if 'txt' in args.format:
+            concat_outputs.append(f"{args.outfile}.txt")
+        if 'md' in args.format:
+            concat_outputs.append(f"{args.outfile}.md")
+        if 'word' in args.format:
+            concat_outputs.append(f"{args.outfile}.docx")
+        if concat_outputs:
+            log.info(f'+  Concat outputs: {", ".join(concat_outputs)}')
         if not args.get_posts:
             if args.indir:
                 log.info(f'+  Concatenating from: {args.indir}')
@@ -1170,6 +1335,30 @@ def main():
     indir_list = args.indir or []
     results_outfile = args.outfile or f"out.{args.outfile_format}"
     results_rows = []
+    op_counts = {}
+    summary = {
+        'requested_posts': 0,
+        'scanned_posts': 0,
+        'download_posts': 0,
+        'download_txt': 0,
+        'download_md': 0,
+        'download_docx': 0,
+        'download_meta': 0,
+        'skipped_seen': 0,
+        'skipped_duplicate': 0,
+        'skipped_other': 0,
+        'concat_txt': 0,
+        'concat_md': 0,
+        'concat_docx': 0,
+    }
+    results_file_path = None
+    date_range = (None, None)
+    if args.date:
+        try:
+            date_range = parse_date_range(args.date)
+        except ValueError as exc:
+            log.error(str(exc))
+            sys.exit(1)
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
     }
@@ -1191,29 +1380,40 @@ def main():
                 'version': plugin.get('version') or '',
                 'plugin': plugin.get('plugin') or ''
             })
+        op_counts['get-plugins'] = len(rows)
         results_rows.extend(rows)
         print(render_ascii_table(rows))
     if args.list_posts:
-        data = fetch_wp_endpoint(args.url, 'posts', headers)
+        list_params = {}
+        if args.date:
+            list_params = add_date_range_params(list_params, date_range)
+        if args.post_state:
+            status_map = {'published': 'publish', 'scheduled': 'future', 'draft': 'draft'}
+            list_params['status'] = status_map.get(args.post_state, 'publish')
+        data = fetch_wp_endpoint(args.url, 'posts', headers, params=list_params)
         rows = normalize_wp_rows('list-posts', data)
+        op_counts['list-posts'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
     if args.get_pages:
         data = fetch_wp_endpoint(args.url, 'pages', headers)
         rows = normalize_wp_rows('get-pages', data)
+        op_counts['get-pages'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
     if args.get_categories:
         data = fetch_wp_endpoint(args.url, 'categories', headers)
         rows = normalize_wp_rows('get-categories', data)
+        op_counts['get-categories'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
     if args.get_tags:
         data = fetch_wp_endpoint(args.url, 'tags', headers)
         rows = normalize_wp_rows('get-tags', data)
+        op_counts['get-tags'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
@@ -1223,6 +1423,7 @@ def main():
             sys.exit(1)
         data = fetch_wp_endpoint(args.url, 'users', headers, params={'context': 'edit'})
         rows = normalize_wp_rows('get-users', data)
+        op_counts['get-users'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
@@ -1232,36 +1433,42 @@ def main():
             sys.exit(1)
         data = fetch_wp_endpoint(args.url, 'users/me', headers, params={'context': 'edit'})
         rows = normalize_wp_rows('get-user-me', data)
+        op_counts['get-user-me'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
     if args.get_media:
         data = fetch_wp_endpoint(args.url, 'media', headers)
         rows = normalize_wp_rows('get-media', data)
+        op_counts['get-media'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
     if args.get_comments:
         data = fetch_wp_endpoint(args.url, 'comments', headers)
         rows = normalize_wp_rows('get-comments', data)
+        op_counts['get-comments'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
     if args.get_types:
         data = fetch_wp_endpoint(args.url, 'types', headers)
         rows = normalize_wp_rows('get-types', data)
+        op_counts['get-types'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
     if args.get_statuses:
         data = fetch_wp_endpoint(args.url, 'statuses', headers)
         rows = normalize_wp_rows('get-statuses', data)
+        op_counts['get-statuses'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
     if args.get_taxonomies:
         data = fetch_wp_endpoint(args.url, 'taxonomies', headers)
         rows = normalize_wp_rows('get-taxonomies', data)
+        op_counts['get-taxonomies'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
@@ -1271,6 +1478,7 @@ def main():
             sys.exit(1)
         data = fetch_wp_endpoint(args.url, 'settings', headers)
         rows = normalize_wp_rows('get-settings', data)
+        op_counts['get-settings'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
@@ -1280,31 +1488,88 @@ def main():
             sys.exit(1)
         data = fetch_wp_endpoint(args.url, 'themes', headers)
         rows = normalize_wp_rows('get-themes', data)
+        op_counts['get-themes'] = len(rows)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
     # Download, using existing indices from all provided indir_list
     if args.get_posts:
-        download_results = download_blog_posts_wp_api(args.url, args.number, args.outdir, args.format, indir_list, args.with_meta)
+        summary['requested_posts'] = args.number or 0
+        status_map = {'published': 'publish', 'scheduled': 'future', 'draft': 'draft'}
+        status = status_map.get(args.post_state, 'publish')
+        download_results, download_stats = download_blog_posts_wp_api(
+            args.url,
+            None if args.date else args.number,
+            args.outdir,
+            args.format,
+            indir_list,
+            args.with_meta,
+            date_range,
+            status
+        )
         for row in (download_results or []):
             row['operation'] = 'get-posts'
             results_rows.append(row)
         if download_results:
+            summary['download_posts'] = len(download_results)
+            summary['download_txt'] = sum(1 for r in download_results if r.get('text_path'))
+            summary['download_md'] = sum(1 for r in download_results if r.get('md_path'))
+            summary['download_docx'] = sum(1 for r in download_results if r.get('docx_path'))
+            summary['download_meta'] = sum(1 for r in download_results if r.get('meta_path'))
+            op_counts['get-posts'] = len(download_results)
             print(render_ascii_table(download_results))
+        if download_stats:
+            summary['scanned_posts'] = download_stats.get('scanned', 0)
+            summary['skipped_seen'] = download_stats.get('skipped_seen', 0)
+            summary['skipped_duplicate'] = download_stats.get('skipped_duplicate', 0)
+            summary['skipped_other'] = download_stats.get('skipped_other', 0)
         # After downloading into outdir, include it for concat
         indir_list = indir_list + [args.outdir]
     # Concatenate from all directories (original and newly downloaded)
     if args.concat:
         if 'txt' in args.format:
-            concatenate_text_files(indir_list, args.outfile, args.number, 'txt')
+            summary['concat_txt'] = concatenate_text_files(indir_list, args.outfile, args.number, 'txt')
         if 'md' in args.format:
-            concatenate_text_files(indir_list, args.outfile, args.number, 'md')
+            summary['concat_md'] = concatenate_text_files(indir_list, args.outfile, args.number, 'md')
         if 'word' in args.format:
-            concatenate_word_documents(indir_list, args.outfile, args.number)
+            summary['concat_docx'] = concatenate_word_documents(indir_list, args.outfile, args.number)
     if results_rows:
         out_path = write_results(results_outfile, args.outfile_format, results_rows)
         if out_path:
             log.info(f'Wrote results file: {out_path}')
+            results_file_path = out_path
+    log.info('+++++++++++++++++++++++++ Summary +++++++++++++++++++++++++')
+    if op_counts:
+        for op_name, count in sorted(op_counts.items()):
+            log.info(f'+  {op_name}: {count}')
+    if results_rows:
+        log.info(f'+  Rows written to file: {len(results_rows)}')
+        if results_file_path:
+            log.info(f'+  Results file path: {results_file_path}')
+    if summary['download_posts']:
+        if args.date:
+            log.info(f'+  Date range: {args.date}')
+        elif summary['requested_posts']:
+            log.info(f'+  Requested downloads: {summary["requested_posts"]}')
+        if summary['scanned_posts']:
+            log.info(f'+  Scanned posts: {summary["scanned_posts"]}')
+        log.info(f'+  Downloaded posts: {summary["download_posts"]}')
+        log.info(f'+  Files written: txt={summary["download_txt"]}, md={summary["download_md"]}, word={summary["download_docx"]}, meta={summary["download_meta"]}')
+        if args.with_meta:
+            log.info(f'+  Metadata files path: {args.outdir}/*.meta.json')
+        skipped_total = summary['skipped_seen'] + summary['skipped_duplicate'] + summary['skipped_other']
+        log.info(f'+  Skipped posts: {skipped_total} (seen={summary["skipped_seen"]}, duplicate={summary["skipped_duplicate"]}, other={summary["skipped_other"]})')
+    if args.concat:
+        concat_parts = []
+        if 'txt' in args.format:
+            concat_parts.append(f"txt={summary['concat_txt']}")
+        if 'md' in args.format:
+            concat_parts.append(f"md={summary['concat_md']}")
+        if 'word' in args.format:
+            concat_parts.append(f"word={summary['concat_docx']}")
+        if concat_parts:
+            log.info(f'+  Concat files written: {", ".join(concat_parts)}')
+    log.info('+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++')
 
 if __name__ == '__main__':
     main()
