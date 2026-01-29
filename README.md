@@ -26,10 +26,11 @@ Results from `--get-plugins`, `--get-posts`, or any other `--get-*` operation ar
 - `--post-state` Post state to fetch: published, scheduled, or draft [default: published]
 - `--with-meta` Save per-post metadata JSON alongside downloaded posts
 - `--get-posts` Download posts
+- `--export-site` Export site data: all, all-no-media, or comma-separated list (posts,pages,media,comments,users,categories,tags,taxonomies,types,statuses,settings,menus,plugins)
+- `--incremental` For `--export-site`, append only new items to JSONL outputs
 - `--list-posts` Print posts via WP REST API
 - `--concat` Concatenate files
 - `--get-plugins` Print plugin list via WP REST API (requires credentials)
-- `--get-posts` Print posts via WP REST API
 - `--get-pages` Print pages via WP REST API
 - `--get-categories` Print categories via WP REST API
 - `--get-tags` Print tags via WP REST API
@@ -80,6 +81,20 @@ Examples:
   ```bash
   python3 wp_utilities.py --get-categories --url https://johnmaconline.com --outfile categories --outfile-format json
   ```
+- Export a full site backup (content + metadata + media binaries):
+  ```bash
+  python3 wp_utilities.py --export-site all --url https://johnmaconline.com
+  ```
+  Note: exporting plugins/users/settings may require WP credentials.
+- Export everything but media binaries (metadata only):
+  ```bash
+  python3 wp_utilities.py --export-site all-no-media --url https://johnmaconline.com
+  ```
+- Incremental export of posts + media:
+  ```bash
+  python3 wp_utilities.py --export-site posts,media --incremental --url https://johnmaconline.com
+  ```
+  This writes to `export/` with `*.jsonl` files, `export/site.json`, and a `export/manifest.json`.
 
 ### `categorize_wp_posts.py`
 Uses OpenAI to decide if posts should be tagged with a target category and additively updates categories.

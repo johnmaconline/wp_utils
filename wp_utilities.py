@@ -17,6 +17,7 @@ import argparse
 import logging
 import sys
 import os
+import json
 from datetime import date
 from docx import Document
 from docx.shared import Pt
@@ -51,6 +52,23 @@ TABLE_MAX_WIDTH = 120
 TABLE_MIN_WIDTH = 4
 TABLE_MIN_WIDTH_TITLE = 20
 TABLE_MIN_WIDTH_DATE = 10
+# Export defaults
+EXPORT_DEFAULT_DIR = 'export'
+EXPORT_RESOURCES = {
+    'posts',
+    'pages',
+    'media',
+    'comments',
+    'users',
+    'categories',
+    'tags',
+    'taxonomies',
+    'types',
+    'statuses',
+    'settings',
+    'menus',
+    'plugins',
+}
 
 # ****************************************************************************************
 # Exceptions
@@ -772,6 +790,258 @@ def add_date_range_params(params, date_range):
     params['before'] = end.strftime('%Y-%m-%dT23:59:59')
     return params
 
+
+def parse_export_site_arg(arg_value):
+    if not arg_value:
+        return set(), False
+    raw = [part.strip().lower() for part in arg_value.split(',') if part.strip()]
+    if not raw:
+        raise ValueError('Invalid --export-site value (empty).')
+    if 'all' in raw and 'all-no-media' in raw:
+        raise ValueError('Cannot combine all and all-no-media in --export-site.')
+    if 'all' in raw:
+        return set(EXPORT_RESOURCES), True
+    if 'all-no-media' in raw:
+        return set(EXPORT_RESOURCES), False
+    unknown = [item for item in raw if item not in EXPORT_RESOURCES]
+    if unknown:
+        raise ValueError(f'Unknown --export-site option(s): {", ".join(sorted(unknown))}')
+    return set(raw), ('media' in raw)
+
+
+def fetch_wp_root(url, headers):
+    base = build_wp_api_base(url)
+    if not base:
+        log.error("Invalid URL for WordPress API.")
+        return None
+    root_url = f"{base.rstrip('/')}/wp-json"
+    response = requests.get(root_url, headers=headers)
+    if response.status_code >= 400:
+        log.error(f"Failed to fetch WP root: {response.status_code} {response.text}")
+        return None
+    return response.json()
+
+
+def fetch_wp_menus(url, headers):
+    base = build_wp_api_base(url)
+    if not base:
+        log.error("Invalid URL for WordPress API.")
+        return None
+    candidates = [
+        f"{base.rstrip('/')}/wp-json/wp/v2/menus",
+        f"{base.rstrip('/')}/wp-json/wp-api-menus/v2/menus"
+    ]
+    for menu_url in candidates:
+        response = requests.get(menu_url, headers=headers, params={'per_page': WP_API_MAX_PER_PAGE})
+        if response.status_code == 404:
+            continue
+        if response.status_code >= 400:
+            log.error(f"Failed to fetch menus: {response.status_code} {response.text}")
+            return None
+        data = response.json()
+        return data
+    log.warning("Menus endpoint not available via REST API.")
+    return None
+
+
+def _load_existing_ids(path):
+    ids = set()
+    if not os.path.exists(path):
+        return ids
+    with open(path, 'r') as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item_id = item.get('id')
+            if item_id is not None:
+                ids.add(item_id)
+    return ids
+
+
+def _write_json_file(path, data):
+    with open(path, 'w') as file:
+        json.dump(data, file, indent=2)
+
+
+def _write_jsonl(path, items, incremental=False, existing_ids=None):
+    if incremental:
+        if existing_ids is None:
+            existing_ids = _load_existing_ids(path)
+        mode = 'a'
+    else:
+        existing_ids = set()
+        mode = 'w'
+    written = 0
+    skipped = 0
+    with open(path, mode) as file:
+        for item in items:
+            item_id = item.get('id')
+            if incremental and item_id is not None and item_id in existing_ids:
+                skipped += 1
+                continue
+            file.write(json.dumps(item, ensure_ascii=True) + '\n')
+            written += 1
+    return written, skipped, len(items)
+
+
+def _download_media_files(media_items, outdir, incremental=False, existing_ids=None):
+    media_dir = os.path.join(outdir, 'media')
+    os.makedirs(media_dir, exist_ok=True)
+    downloaded = 0
+    skipped_existing = 0
+    skipped_missing = 0
+    failed = 0
+    if incremental and existing_ids is None:
+        existing_ids = set()
+    for item in media_items:
+        item_id = item.get('id')
+        if incremental and item_id is not None and item_id in existing_ids:
+            skipped_existing += 1
+            continue
+        source_url = item.get('source_url') or ''
+        if not source_url:
+            skipped_missing += 1
+            continue
+        filename = os.path.basename(urlparse(source_url).path)
+        if not filename:
+            filename = f"media_{item_id or 'unknown'}"
+        filename = f"{item_id}_{valid_filename(filename)}" if item_id is not None else valid_filename(filename)
+        dest_path = os.path.join(media_dir, filename)
+        if incremental and os.path.exists(dest_path):
+            skipped_existing += 1
+            continue
+        try:
+            response = requests.get(source_url, stream=True)
+            if response.status_code >= 400:
+                failed += 1
+                continue
+            with open(dest_path, 'wb') as file:
+                for chunk in response.iter_content(8192):
+                    file.write(chunk)
+            item['exported_path'] = dest_path
+            downloaded += 1
+        except requests.RequestException:
+            failed += 1
+    return {
+        'downloaded': downloaded,
+        'skipped_existing': skipped_existing,
+        'skipped_missing_url': skipped_missing,
+        'failed': failed
+    }
+
+
+def export_site(url, headers, export_items, outdir, incremental, download_media):
+    export_summary = {
+        'resources': {},
+        'warnings': []
+    }
+    os.makedirs(outdir, exist_ok=True)
+
+    log.info(f'+  Exporting site data to: {outdir}')
+    root_info = fetch_wp_root(url, headers)
+    if root_info is None:
+        export_summary['warnings'].append('Failed to fetch site root info')
+    else:
+        root_path = os.path.join(outdir, 'site.json')
+        _write_json_file(root_path, root_info)
+        export_summary['resources']['site'] = {
+            'path': root_path,
+            'count': 1
+        }
+        log.info(f'+  Wrote site.json: {root_path}')
+
+    resource_map = {
+        'posts': ('posts', 'posts.jsonl'),
+        'pages': ('pages', 'pages.jsonl'),
+        'media': ('media', 'media.jsonl'),
+        'comments': ('comments', 'comments.jsonl'),
+        'users': ('users', 'users.jsonl'),
+        'categories': ('categories', 'categories.jsonl'),
+        'tags': ('tags', 'tags.jsonl'),
+        'taxonomies': ('taxonomies', 'taxonomies.json'),
+        'types': ('types', 'types.json'),
+        'statuses': ('statuses', 'statuses.json'),
+        'settings': ('settings', 'settings.json'),
+        'menus': ('menus', 'menus.jsonl'),
+        'plugins': ('plugins', 'plugins.jsonl')
+    }
+    for resource in sorted(export_items):
+        endpoint, filename = resource_map[resource]
+        params = {}
+        if resource in {'posts', 'pages', 'media', 'users'} and headers.get('Authorization'):
+            params['context'] = 'edit'
+        if resource in {'posts', 'pages'} and headers.get('Authorization'):
+            params['status'] = 'any'
+        log.info(f'+  Exporting {resource} via WP API')
+        if resource == 'menus':
+            data = fetch_wp_menus(url, headers)
+        elif resource == 'plugins':
+            if not headers.get('Authorization'):
+                export_summary['warnings'].append('Plugins export skipped: missing credentials')
+                log.info('+  Plugins export skipped: missing credentials')
+                continue
+            data = fetch_wp_plugins(url, headers)
+        else:
+            data = fetch_wp_endpoint(url, endpoint, headers, params=params)
+        if data is None:
+            export_summary['warnings'].append(f'Failed to fetch {resource}')
+            log.info(f'+  Export failed for {resource}')
+            continue
+        path = os.path.join(outdir, filename)
+        if isinstance(data, list):
+            existing_ids = _load_existing_ids(path) if incremental else None
+            log.info(f'+  {resource} fetched: {len(data)} items')
+            if resource == 'media' and download_media:
+                log.info('+  Downloading media binaries')
+                media_stats = _download_media_files(data, outdir, incremental, existing_ids)
+                export_summary['resources']['media_files'] = {
+                    'downloaded': media_stats['downloaded'],
+                    'skipped_existing': media_stats['skipped_existing'],
+                    'skipped_missing_url': media_stats['skipped_missing_url'],
+                    'failed': media_stats['failed'],
+                    'path': os.path.join(outdir, 'media')
+                }
+                log.info(
+                    f'+  Media files: downloaded={media_stats["downloaded"]}, '
+                    f'skipped_existing={media_stats["skipped_existing"]}, '
+                    f'skipped_missing_url={media_stats["skipped_missing_url"]}, '
+                    f'failed={media_stats["failed"]}'
+                )
+            written, skipped, total = _write_jsonl(path, data, incremental=incremental, existing_ids=existing_ids)
+            export_summary['resources'][resource] = {
+                'path': path,
+                'count': total,
+                'written': written,
+                'skipped_existing': skipped
+            }
+            log.info(f'+  Wrote {resource}: {path} (written={written}, skipped_existing={skipped})')
+        else:
+            _write_json_file(path, data)
+            export_summary['resources'][resource] = {
+                'path': path,
+                'count': len(data) if isinstance(data, dict) else 1
+            }
+            log.info(f'+  Wrote {resource}: {path}')
+
+    manifest_path = os.path.join(outdir, 'manifest.json')
+    manifest = {
+        'generated_at': datetime.utcnow().isoformat() + 'Z',
+        'source_url': build_wp_api_base(url),
+        'incremental': bool(incremental),
+        'download_media': bool(download_media),
+        'resources': export_summary['resources'],
+        'warnings': export_summary['warnings']
+    }
+    _write_json_file(manifest_path, manifest)
+    export_summary['manifest'] = manifest_path
+    log.info(f'+  Wrote manifest: {manifest_path}')
+    return export_summary
+
 def fetch_wp_posts_page(api_posts_url, headers, page=1, per_page=WP_API_MAX_PER_PAGE, date_range=None, status=None):
     params = {
         'per_page': per_page,
@@ -1099,6 +1369,13 @@ def handle_args():
         action='store_true',
         help='Download posts via the REST API.')
     parser.add_argument(
+        '--export-site',
+        help='Export site data via REST API: all, all-no-media, or comma-separated list (posts,pages,media,comments,users,categories,tags,taxonomies,types,statuses,settings,menus,plugins)')
+    parser.add_argument(
+        '--incremental',
+        action='store_true',
+        help='For --export-site, append only new items to JSONL outputs.')
+    parser.add_argument(
         '--get-plugins',
         action='store_true',
         help='Fetch and print WordPress plugins via the REST API (requires credentials).')
@@ -1192,6 +1469,13 @@ def handle_args():
         ch.setLevel(logging.INFO)
     ch.setFormatter(formatter)
     log.addHandler(ch)
+    try:
+        export_items, export_download_media = parse_export_site_arg(args.export_site) if args.export_site else (set(), False)
+    except ValueError as exc:
+        log.error(str(exc))
+        sys.exit(1)
+    args.export_site_items = export_items
+    args.export_download_media = export_download_media
     
     # check requirements
     if args.get_posts:
@@ -1205,6 +1489,9 @@ def handle_args():
     if args.post_state != 'published' and not (args.wp_username and args.wp_app_password):
         log.error('XXX Non-published post states require WP credentials')
         sys.exit(1)
+    if args.export_site and not args.url:
+        log.error('XXX Must supply a URL for --export-site')
+        sys.exit(1)
     if (args.get_plugins or args.list_posts or args.get_pages or args.get_categories or args.get_tags or
             args.get_users or args.get_user_me or args.get_media or args.get_comments or args.get_types or
             args.get_statuses or args.get_taxonomies or args.get_settings or args.get_themes) and not args.url:
@@ -1215,6 +1502,19 @@ def handle_args():
     log.info(f'+  {os.path.basename(sys.argv[0])}')
     log.info(f'+  Python Version: {sys.version.split()[0]}')
     log.info(f'+  Today is: {date.today()}')
+    if args.export_site:
+        log.info('+  Exporting site via WP API')
+        log.info(f'+  Target URL: {args.url}')
+        log.info(f'+  Export directory: {EXPORT_DEFAULT_DIR}')
+        log.info(f'+  Export items: {", ".join(sorted(args.export_site_items))}')
+        log.info(f'+  Incremental: {args.incremental}')
+        if 'media' in args.export_site_items:
+            if args.export_download_media:
+                log.info('+  Media binaries: enabled')
+            else:
+                log.info('+  Media binaries: disabled (metadata only)')
+        if args.export_site_items.intersection({'users', 'settings'}) and not (args.wp_username and args.wp_app_password):
+            log.info('+  Credentials not provided; some export items may fail')
     if args.get_posts:
         log.info('+  Fetching posts via WP API')
         log.info(f'+  Target URL: {args.url}')
@@ -1352,6 +1652,7 @@ def main():
         'concat_docx': 0,
     }
     results_file_path = None
+    export_summary = None
     date_range = (None, None)
     if args.date:
         try:
@@ -1364,6 +1665,15 @@ def main():
     }
     if args.wp_username and args.wp_app_password:
         headers.update(build_auth_header(args.wp_username, args.wp_app_password))
+    if args.export_site:
+        export_summary = export_site(
+            args.url,
+            headers,
+            args.export_site_items,
+            EXPORT_DEFAULT_DIR,
+            args.incremental,
+            args.export_download_media
+        )
     if args.get_plugins:
         if not args.wp_username or not args.wp_app_password:
             log.error('XXX Missing WP credentials for --get-plugins')
@@ -1569,6 +1879,37 @@ def main():
             concat_parts.append(f"word={summary['concat_docx']}")
         if concat_parts:
             log.info(f'+  Concat files written: {", ".join(concat_parts)}')
+    if export_summary:
+        log.info(f'+  Export output: {EXPORT_DEFAULT_DIR}')
+        resources = export_summary.get('resources', {})
+        for resource_name in sorted(resources.keys()):
+            info = resources[resource_name]
+            if resource_name == 'media_files':
+                log.info(
+                    f'+  Media files: downloaded={info.get("downloaded", 0)}, '
+                    f'skipped_existing={info.get("skipped_existing", 0)}, '
+                    f'skipped_missing_url={info.get("skipped_missing_url", 0)}, '
+                    f'failed={info.get("failed", 0)}'
+                )
+                log.info(f'+  Media files path: {info.get("path", "")}')
+                continue
+            if 'written' in info:
+                log.info(
+                    f'+  Exported {resource_name}: total={info.get("count", 0)}, '
+                    f'written={info.get("written", 0)}, '
+                    f'skipped_existing={info.get("skipped_existing", 0)}'
+                )
+            else:
+                log.info(f'+  Exported {resource_name}: count={info.get("count", 0)}')
+            if info.get('path'):
+                log.info(f'+  {resource_name} file: {info.get("path")}')
+        if export_summary.get('manifest'):
+            log.info(f'+  Export manifest: {export_summary["manifest"]}')
+        warnings = export_summary.get('warnings') or []
+        if warnings:
+            log.info('+  Export warnings:')
+            for warning in warnings:
+                log.info(f'+    {warning}')
     log.info('+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++')
 
 if __name__ == '__main__':
