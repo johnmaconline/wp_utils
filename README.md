@@ -20,10 +20,11 @@ Args:
 - `--outfile` Output file base name (defaults to `out.<format>` if omitted)
 - `--outfile-format` Results output format: `csv` or `json` (default: `csv`)
 
-Results from `--get-plugins` or `--download` are written to a file and also printed to stdout as an ASCII table. If `--outfile` is omitted, the default is `out.<format>`.
+Results from `--get-plugins`, `--get-posts`, or any other `--get-*` operation are written to a file and also printed to stdout as an ASCII table. If `--outfile` is omitted, the default is `out.<format>`.
 - `--format` Output formats for downloaded posts (supports multiple) [default: txt]
 - `--with-meta` Save per-post metadata JSON alongside downloaded posts
-- `--download` Download posts
+- `--get-posts` Download posts
+- `--list-posts` Print posts via WP REST API
 - `--concat` Concatenate files
 - `--get-plugins` Print plugin list via WP REST API (requires credentials)
 - `--get-posts` Print posts via WP REST API
@@ -47,15 +48,19 @@ Results from `--get-plugins` or `--download` are written to a file and also prin
 Examples:
 - Download all posts as txt:
   ```bash
-  python3 wp_utilities.py --download --url https://johnmaconline.com --outdir posts --format txt
+  python3 wp_utilities.py --get-posts --url https://johnmaconline.com --outdir posts --format txt
   ```
 - Download and concatenate:
   ```bash
-  python3 wp_utilities.py --download --url https://johnmaconline.com --outdir posts --format txt --concat --outfile all_files
+  python3 wp_utilities.py --get-posts --url https://johnmaconline.com --outdir posts --format txt --concat --outfile all_files
   ```
 - Download as txt + md + word and include metadata:
   ```bash
-  python3 wp_utilities.py --download --url https://johnmaconline.com --outdir posts --format txt md word --with-meta
+  python3 wp_utilities.py --get-posts --url https://johnmaconline.com --outdir posts --format txt md word --with-meta
+  ```
+- List posts (no downloads):
+  ```bash
+  python3 wp_utilities.py --list-posts --url https://johnmaconline.com
   ```
 - Get plugins (requires credentials) and save results:
   ```bash

@@ -350,8 +350,8 @@ def _select_columns(rows):
         op = next(iter(ops))
         op_map = {
             'get-plugins': ['name', 'operation', 'plugin', 'status', 'version'],
-            'download': ['operation', 'title', 'date', 'url', 'text_path', 'md_path', 'docx_path', 'meta_path'],
-            'get-posts': ['id', 'title', 'status', 'date', 'link'],
+            'get-posts': ['operation', 'title', 'date', 'url', 'text_path', 'md_path', 'docx_path', 'meta_path'],
+            'list-posts': ['id', 'title', 'status', 'date', 'link'],
             'get-pages': ['id', 'title', 'status', 'date', 'link'],
             'get-categories': ['id', 'name', 'slug', 'count'],
             'get-tags': ['id', 'name', 'slug', 'count'],
@@ -632,7 +632,7 @@ def normalize_wp_rows(operation, data):
         return BeautifulSoup(title_html, 'html.parser').get_text().strip()
 
     for item in data:
-        if operation in {'get-posts', 'get-pages'}:
+        if operation in {'list-posts', 'get-pages'}:
             rows.append({
                 'operation': operation,
                 'id': item.get('id'),
@@ -998,15 +998,15 @@ def handle_args():
         default=['txt'],
         help='Output formats for downloaded posts [default: txt]')
     parser.add_argument(
-        '--download',
+        '--get-posts',
         action='store_true',
-        help='Download blog posts.')    
+        help='Download posts via the REST API.')
     parser.add_argument(
         '--get-plugins',
         action='store_true',
         help='Fetch and print WordPress plugins via the REST API (requires credentials).')
     parser.add_argument(
-        '--get-posts',
+        '--list-posts',
         action='store_true',
         help='Fetch and print posts via the REST API.')
     parser.add_argument(
@@ -1097,13 +1097,13 @@ def handle_args():
     log.addHandler(ch)
     
     # check requirements
-    if args.download:
+    if args.get_posts:
         if args.url:
             log.debug(f'Download requirements met')
         else:
             log.error(f'XXX Must supply a URL')
             sys.exit(1)
-    if (args.get_plugins or args.get_posts or args.get_pages or args.get_categories or args.get_tags or
+    if (args.get_plugins or args.list_posts or args.get_pages or args.get_categories or args.get_tags or
             args.get_users or args.get_user_me or args.get_media or args.get_comments or args.get_types or
             args.get_statuses or args.get_taxonomies or args.get_settings or args.get_themes) and not args.url:
         log.error('XXX Must supply a URL for --get-* operations')
@@ -1113,7 +1113,7 @@ def handle_args():
     log.info(f'+  {os.path.basename(sys.argv[0])}')
     log.info(f'+  Python Version: {sys.version.split()[0]}')
     log.info(f'+  Today is: {date.today()}')
-    if args.download:
+    if args.get_posts:
         log.info(f'+  Target URL: {args.url}')
         log.info(f'+  Number of posts to download: {"All" if args.number is None else args.number}')
         log.info(f'+  Output directory: {args.outdir}')
@@ -1122,7 +1122,7 @@ def handle_args():
             log.info('+  Including metadata')
     if args.get_plugins:
         log.info('+  Fetching plugin list via WP API')
-    if args.get_posts:
+    if args.list_posts:
         log.info('+  Fetching posts via WP API')
     if args.get_pages:
         log.info('+  Fetching pages via WP API')
@@ -1151,7 +1151,7 @@ def handle_args():
     if args.concat:
         log.info(f'+  Concatenating files')
         log.info(f'+  Output file: {args.outfile}')
-        if not args.download:
+        if not args.get_posts:
             if args.indir:
                 log.info(f'+  Concatenating from: {args.indir}')
             else:
@@ -1193,9 +1193,9 @@ def main():
             })
         results_rows.extend(rows)
         print(render_ascii_table(rows))
-    if args.get_posts:
+    if args.list_posts:
         data = fetch_wp_endpoint(args.url, 'posts', headers)
-        rows = normalize_wp_rows('get-posts', data)
+        rows = normalize_wp_rows('list-posts', data)
         results_rows.extend(rows)
         if rows:
             print(render_ascii_table(rows))
@@ -1284,10 +1284,10 @@ def main():
         if rows:
             print(render_ascii_table(rows))
     # Download, using existing indices from all provided indir_list
-    if args.download:
+    if args.get_posts:
         download_results = download_blog_posts_wp_api(args.url, args.number, args.outdir, args.format, indir_list, args.with_meta)
         for row in (download_results or []):
-            row['operation'] = 'download'
+            row['operation'] = 'get-posts'
             results_rows.append(row)
         if download_results:
             print(render_ascii_table(download_results))
