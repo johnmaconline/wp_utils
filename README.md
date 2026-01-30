@@ -128,6 +128,52 @@ Examples:
   ```bash
   python3 wp_utilities.py --export-site all-no-media --url https://johnmaconline.com
   ```
+
+### `wp_agent.py`
+Agentic workflow (Google ADK style) for WordPress publishing. Uses OpenAI to generate metadata JSON
+and then schedules the post using the same wp_utilities toolset.
+Prompt template: `wp_meta_prompt.md`
+
+Prereqs:
+```bash
+export OPENAI_API_KEY="your-openai-key"
+export GOOGLE_ADK_API_KEY="your-google-key"  # stubbed client, used for parity with jobber.ai
+export WP_USERNAME="your_wp_user"
+export WP_APP_PASSWORD="xxxx xxxx xxxx xxxx xxxx"
+```
+
+Args:
+- `--content-md` Markdown file(s) to publish (accepts globs and lists)
+- `--invoke-llm` Call OpenAI to generate metadata JSON
+- `--schedule/--no-schedule` Schedule posts after metadata (default: true)
+- `--dry-run` No publish
+- `--preview` Print the final WordPress payload
+- `--llm-model` OpenAI model (default from `WP_AGENT_LLM_MODEL` or `gpt-5.1`)
+- `--outdir` Output dir for artifacts (default: `./out`)
+- `--url` Target site (default: `johnmaconline.com`)
+
+Notes:
+- The LLM can suggest categories and tags. Categories are capped at 4.
+- `The250` is always added automatically and must exist on the site.
+- Tags are capped at 8 and missing tags are created automatically.
+- Existing tags are provided to the LLM (capped at 50 by usage count).
+- If `--invoke-llm` is omitted, a stub `meta.json` is written and no publish occurs.
+
+Example:
+```bash
+python3 wp_agent.py \
+  --content-md "new_posts/*.md" \
+  --invoke-llm \
+  --preview \
+  --dry-run
+```
+
+To publish:
+```bash
+python3 wp_agent.py \
+  --content-md "new_posts/*.md" \
+  --invoke-llm
+```
 - Incremental export of posts + media:
   ```bash
   python3 wp_utilities.py --export-site posts,media --incremental --url https://johnmaconline.com
