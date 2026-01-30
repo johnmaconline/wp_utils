@@ -13,7 +13,7 @@ Utilities for working with a WordPress blog:
 Downloads posts via the WP REST API, concatenates files, and can list plugins.
 
 Args:
-- `--url` URL of the site or WP API root
+- `--url` URL of the site or WP API root (default: `johnmaconline.com`, scheme optional)
 - `--number` Number of posts to download
 - `--outdir` Directory to save posts (default: `posts`)
 - `--indir` One or more input dirs for concat (space‑separated)
@@ -109,10 +109,11 @@ Examples:
     --preview
   ```
   Notes:
-  - Categories are resolved by name and must already exist.
-  - `The250` is always added automatically.
-  - Tags are optional and resolved by name if provided.
+  - `The250` is always added automatically and must exist on the site.
+  - Other categories are resolved by name; missing categories log a warning and are skipped.
+  - Tags are optional and resolved by name; missing tags are created automatically.
   - If `slug` is omitted, it is auto-generated from the title (lowercase, words joined by `-`).
+  - A leading `# H1` at the top of the markdown is stripped to avoid duplicate titles.
   Metadata JSON format:
   ```json
   {

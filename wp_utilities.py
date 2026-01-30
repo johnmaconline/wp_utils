@@ -1061,7 +1061,19 @@ def load_meta_json(path):
     return data
 
 
-def resolve_term_ids(url, headers, endpoint, names):
+def strip_leading_h1(markdown_text):
+    lines = markdown_text.splitlines()
+    idx = 0
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx < len(lines) and re.match(r'^\s*#\s+\S', lines[idx]):
+        del lines[idx]
+        if idx < len(lines) and not lines[idx].strip():
+            del lines[idx]
+    return "\n".join(lines)
+
+
+def resolve_term_ids(url, headers, endpoint, names, create_missing=False, warn_missing=False):
     ids = []
     for name in names:
         params = {'search': name}
@@ -1073,9 +1085,30 @@ def resolve_term_ids(url, headers, endpoint, names):
             if (item.get('name') or '').lower() == name.lower():
                 matches.append(item)
         if not matches:
-            raise ValueError(f'No {endpoint} found for name: {name}')
-        ids.append(matches[0].get('id'))
+            if not create_missing:
+                if warn_missing:
+                    log.warning(f"Missing {endpoint} name '{name}', skipping")
+                    continue
+                raise ValueError(f'No {endpoint} found for name: {name}')
+            term = create_wp_term(url, headers, endpoint, name)
+            ids.append(term.get('id'))
+        else:
+            ids.append(matches[0].get('id'))
     return ids
+
+
+def create_wp_term(url, headers, endpoint, name):
+    base = build_wp_api_base(url)
+    if not base:
+        raise ValueError("Invalid URL for WordPress API.")
+    if not headers.get('Authorization'):
+        raise ValueError(f"Missing credentials to create {endpoint}: {name}")
+    endpoint = endpoint.lstrip('/')
+    full_url = f"{base.rstrip('/')}/wp-json/wp/v2/{endpoint}"
+    response = requests.post(full_url, headers=headers, json={'name': name})
+    if response.status_code >= 400:
+        raise ValueError(f"Failed to create {endpoint} '{name}': {response.status_code} {response.text}")
+    return response.json()
 
 
 def upload_media_and_replace(markdown_text, base_dir, url, headers):
@@ -1174,14 +1207,20 @@ def build_schedule_payload(url, headers, content_md, meta, tz_name=DEFAULT_TIMEZ
         seen.add(key)
         deduped.append(name)
     categories = deduped
-    category_ids = resolve_term_ids(url, headers, 'categories', categories)
+    required_categories = [name for name in categories if name.lower() == 'the250']
+    optional_categories = [name for name in categories if name.lower() != 'the250']
+    category_ids = []
+    if required_categories:
+        category_ids.extend(resolve_term_ids(url, headers, 'categories', required_categories))
+    if optional_categories:
+        category_ids.extend(resolve_term_ids(url, headers, 'categories', optional_categories, warn_missing=True))
     tags = meta.get('tags') or []
     if isinstance(tags, str):
         tags = [tags]
     if tags:
         if not isinstance(tags, list):
             raise ValueError('tags must be a list of tag names.')
-        tag_ids = resolve_term_ids(url, headers, 'tags', tags)
+        tag_ids = resolve_term_ids(url, headers, 'tags', tags, create_missing=True)
     else:
         tag_ids = []
 
@@ -1516,7 +1555,8 @@ def handle_args():
     parser = argparse.ArgumentParser(description='Download blog posts as text documents')
     parser.add_argument(
         '--url', 
-        help='URL of the blog page')
+        default='johnmaconline.com',
+        help='URL of the blog page (default: johnmaconline.com; scheme optional)')
     parser.add_argument(
         '--number', 
         type=int, 
@@ -1906,7 +1946,7 @@ def main():
     if args.schedule_post:
         try:
             meta = load_meta_json(args.meta_json)
-            content_md = read_markdown_content(args.content_md)
+            content_md = strip_leading_h1(read_markdown_content(args.content_md))
             base_dir = os.path.dirname(args.content_md) if args.content_md != '-' else os.getcwd()
             uploads = []
             if args.dry_run:
