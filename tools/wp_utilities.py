@@ -794,6 +794,31 @@ def add_date_range_params(params, date_range):
     return params
 
 
+def load_dotenv(path: str = '.env', required: bool = True):
+    env_path = os.path.join(os.getcwd(), path)
+    if not os.path.exists(env_path):
+        if required:
+            log.error(f'XXX Missing required env file: {env_path}')
+            sys.exit(1)
+        return
+    try:
+        with open(env_path, 'r') as file:
+            for line in file:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception as exc:
+        log.error(f'XXX Failed to read env file {env_path}: {exc}')
+        sys.exit(1)
+
+
 def parse_export_site_arg(arg_value):
     if not arg_value:
         return set(), False
@@ -1247,6 +1272,26 @@ def build_schedule_payload(url, headers, content_md, meta, tz_name=DEFAULT_TIMEZ
     if slug:
         payload['slug'] = slug
 
+    yoast_meta = {}
+    focus_keyphrase = (
+        meta.get('yoast_wpseo_focuskw')
+        or meta.get('yoast_focus_keyphrase')
+        or meta.get('focus_keyphrase')
+        or ''
+    )
+    meta_description = (
+        meta.get('yoast_wpseo_metadesc')
+        or meta.get('yoast_meta_description')
+        or meta.get('meta_description')
+        or ''
+    )
+    if focus_keyphrase:
+        yoast_meta['yoast_wpseo_focuskw'] = focus_keyphrase
+    if meta_description:
+        yoast_meta['yoast_wpseo_metadesc'] = meta_description
+    if yoast_meta:
+        payload['meta'] = yoast_meta
+
     return payload, schedule_dt
 
 
@@ -1552,6 +1597,7 @@ def concatenate_word_documents(indir_list, outfile, num_files=None):
 # arguments
 # ****************************************************************************************
 def handle_args():
+    load_dotenv()
     parser = argparse.ArgumentParser(description='Download blog posts as text documents')
     parser.add_argument(
         '--url', 

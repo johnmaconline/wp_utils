@@ -11,6 +11,8 @@ Return ONLY valid JSON with these keys:
   - excerpt: string (1-2 sentences, under 40 words)
   - categories: list of strings (0-4)
   - tags: list of strings (3-8)
+  - focus_keyphrase: string (Yoast focus keyphrase)
+  - meta_description: string (Yoast meta description, under 160 chars)
 
 Rules:
 - Do NOT include the category "The250". It will be added automatically.
@@ -19,5 +21,6 @@ Rules:
 - Do not repeat category names as tags.
 - Prefer existing categories/tags when they fit (from the payload lists).
 - Keep categories <= 4 and tags <= 8.
+- Meta description should not exceed 160 characters.
 
 Output JSON only. No commentary, no code blocks.

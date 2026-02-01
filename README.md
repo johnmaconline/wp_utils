@@ -114,6 +114,7 @@ Examples:
   - Tags are optional and resolved by name; missing tags are created automatically.
   - If `slug` is omitted, it is auto-generated from the title (lowercase, words joined by `-`).
   - A leading `# H1` at the top of the markdown is stripped to avoid duplicate titles.
+  - Yoast fields supported: `focus_keyphrase`, `meta_description`.
   Metadata JSON format:
   ```json
   {
@@ -121,7 +122,9 @@ Examples:
     "categories": ["AI"],
     "tags": ["workflow", "automation"],
     "excerpt": "Short summary shown in listings",
-    "slug": "my-post-title"
+    "slug": "my-post-title",
+    "focus_keyphrase": "ai teaching intuition",
+    "meta_description": "AI can teach information, but intuition still requires years of repetition."
   }
   ```
 - Export everything but media binaries (metadata only):
@@ -141,10 +144,18 @@ export GOOGLE_ADK_API_KEY="your-google-key"  # stubbed client, used for parity w
 export WP_USERNAME="your_wp_user"
 export WP_APP_PASSWORD="xxxx xxxx xxxx xxxx xxxx"
 ```
+Or set these in a `.env` file (required). Example:
+```bash
+OPENAI_API_KEY=your-openai-key
+GOOGLE_ADK_API_KEY=your-google-key
+WP_USERNAME=your_wp_user
+WP_APP_PASSWORD=xxxx xxxx xxxx xxxx xxxx
+```
 
 Args:
 - `--content-md` Markdown file(s) to publish (accepts globs and lists)
 - `--invoke-llm` Call OpenAI to generate metadata JSON
+- `--meta-json` Use existing metadata JSON (skip LLM generation)
 - `--schedule/--no-schedule` Schedule posts after metadata (default: true)
 - `--dry-run` No publish
 - `--preview` Print the final WordPress payload
@@ -158,6 +169,7 @@ Notes:
 - Tags are capped at 8 and missing tags are created automatically.
 - Existing tags are provided to the LLM (capped at 50 by usage count).
 - If `--invoke-llm` is omitted, a stub `meta.json` is written and no publish occurs.
+- Yoast fields supported via LLM output: `focus_keyphrase`, `meta_description` (<=160 chars).
 
 Example:
 ```bash
@@ -173,6 +185,13 @@ To publish:
 python3 wp_agent.py \
   --content-md "new_posts/*.md" \
   --invoke-llm
+```
+
+Use an existing meta JSON (skip LLM):
+```bash
+python3 wp_agent.py \
+  --content-md "new_posts/post.md" \
+  --meta-json "out/post_slug/meta.json"
 ```
 - Incremental export of posts + media:
   ```bash

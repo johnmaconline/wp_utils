@@ -311,12 +311,58 @@ def normalize_meta(llm_json: dict[str, Any], default_title: str) -> dict[str, An
     if len(tags) > TAG_LIMIT:
         log.warning(f'Tags over limit ({TAG_LIMIT}); truncating.')
         tags = tags[:TAG_LIMIT]
+    focus_keyphrase = (llm_json.get('focus_keyphrase') or llm_json.get('yoast_focus_keyphrase') or '').strip()
+    meta_description = (llm_json.get('meta_description') or llm_json.get('yoast_meta_description') or '').strip()
+    if meta_description and len(meta_description) > 160:
+        log.warning('Meta description over 160 chars; truncating.')
+        meta_description = meta_description[:160].rstrip()
     return {
         'title': title,
         'excerpt': excerpt,
         'categories': categories,
         'tags': tags,
+        'focus_keyphrase': focus_keyphrase,
+        'meta_description': meta_description,
     }
+
+
+def normalize_user_meta(meta: dict[str, Any], default_title: str) -> dict[str, Any]:
+    title = (meta.get('title') or meta.get('post_title') or '').strip() or default_title
+    excerpt = (meta.get('excerpt') or '').strip()
+    categories = meta.get('categories') or []
+    if isinstance(categories, str):
+        categories = [categories]
+    categories = _dedup_list([str(c) for c in categories if str(c).strip()])
+    categories = [c for c in categories if c.lower() != 'the250']
+    if len(categories) > CATEGORY_LIMIT:
+        log.warning(f'Categories over limit ({CATEGORY_LIMIT}); truncating.')
+        categories = categories[:CATEGORY_LIMIT]
+    tags = meta.get('tags') or []
+    if isinstance(tags, str):
+        tags = [tags]
+    tags = _dedup_list([str(t) for t in tags if str(t).strip()])
+    if len(tags) > TAG_LIMIT:
+        log.warning(f'Tags over limit ({TAG_LIMIT}); truncating.')
+        tags = tags[:TAG_LIMIT]
+    focus_keyphrase = (
+        (meta.get('focus_keyphrase') or meta.get('yoast_focus_keyphrase') or meta.get('yoast_wpseo_focuskw') or '')
+    ).strip()
+    meta_description = (
+        (meta.get('meta_description') or meta.get('yoast_meta_description') or meta.get('yoast_wpseo_metadesc') or '')
+    ).strip()
+    if meta_description and len(meta_description) > 160:
+        log.warning('Meta description over 160 chars; truncating.')
+        meta_description = meta_description[:160].rstrip()
+    out = dict(meta)
+    out['title'] = title
+    out['excerpt'] = excerpt
+    out['categories'] = categories
+    out['tags'] = tags
+    if focus_keyphrase:
+        out['focus_keyphrase'] = focus_keyphrase
+    if meta_description:
+        out['meta_description'] = meta_description
+    return out
 
 
 def fetch_category_context(url: str, headers: dict[str, str]) -> list[str]:
@@ -355,6 +401,7 @@ def build_llm_payload(markdown_text: str, categories: list[str], tags: list[str]
 
 
 def handle_args():
+    wpu.load_dotenv()
     parser = argparse.ArgumentParser(
         description='Agentic WordPress publishing workflow (Google ADK style).'
     )
@@ -373,6 +420,10 @@ def handle_args():
         '--invoke-llm',
         action='store_true',
         help='Use OpenAI to generate metadata JSON.'
+    )
+    parser.add_argument(
+        '--meta-json',
+        help='Path to existing metadata JSON (skip LLM generation).'
     )
     parser.add_argument(
         '--schedule',
@@ -434,6 +485,8 @@ def handle_args():
     log.info(f'+  Target URL: {args.url}')
     log.info(f'+  Content inputs: {args.content_md}')
     log.info(f'+  Invoke LLM: {args.invoke_llm}')
+    if args.meta_json:
+        log.info(f'+  Meta JSON: {args.meta_json}')
     log.info(f'+  Schedule: {args.schedule}')
     if args.dry_run:
         log.info('+  Dry run enabled (no publish)')
@@ -448,6 +501,9 @@ def handle_args():
 def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
     log.debug(f'run_agentic_workflow: args={args}')
     _init_google_client(os.environ.get('GOOGLE_ADK_API_KEY'), args.llm_model)
+    if args.meta_json and args.invoke_llm:
+        log.info('Meta JSON provided; skipping LLM generation.')
+        args.invoke_llm = False
     if args.invoke_llm:
         llm_info = _init_llm_backend()
         if llm_info.get('status') != 'ok':
@@ -483,6 +539,10 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
         'estimated_input_cost': 0.0
     }
 
+    if args.meta_json and len(md_list) > 1:
+        log.error('Using --meta-json with multiple markdown inputs is not supported.')
+        return 2, {}
+
     for md_path in md_list:
         path = Path(md_path)
         if not path.exists():
@@ -497,7 +557,23 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
         (out_dir / 'input.md').write_text(markdown_text, encoding='utf-8')
         meta_path = out_dir / 'meta.json'
 
-        if args.invoke_llm:
+        if args.meta_json:
+            meta_src = Path(args.meta_json)
+            if not meta_src.exists():
+                log.error(f'Metadata file not found: {args.meta_json}')
+                continue
+            try:
+                meta_raw = json.loads(meta_src.read_text(encoding='utf-8'))
+            except Exception as exc:
+                log.error(f'Failed to read meta JSON: {exc}')
+                continue
+            if not isinstance(meta_raw, dict):
+                log.error('Meta JSON must be an object.')
+                continue
+            meta = normalize_user_meta(meta_raw, title_hint)
+            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
+            log.info(f'Wrote meta => {meta_path}')
+        elif args.invoke_llm:
             llm_payload = build_llm_payload(markdown_text, existing_categories, existing_tags)
             llm_input_path = out_dir / 'llm_input.json'
             llm_input_path.write_text(json.dumps(llm_payload, ensure_ascii=False, indent=2), encoding='utf-8')
