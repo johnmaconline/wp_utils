@@ -109,8 +109,7 @@ Examples:
     --preview
   ```
   Notes:
-  - `The250` is always added automatically and must exist on the site.
-  - Other categories are resolved by name; missing categories log a warning and are skipped.
+  - `The250` is always added automatically; missing categories are created automatically.
   - Tags are optional and resolved by name; missing tags are created automatically.
   - If `slug` is omitted, it is auto-generated from the title (lowercase, words joined by `-`).
   - A leading `# H1` at the top of the markdown is stripped to avoid duplicate titles.
@@ -159,12 +158,13 @@ Args:
 - `--schedule/--no-schedule` Schedule posts after metadata (default: true)
 - `--dry-run` No publish
 - `--preview` Print the final WordPress payload
+- `--force` Skip confirmation prompts when updating existing posts
 - `--llm-model` OpenAI model (default from `WP_AGENT_LLM_MODEL` or `gpt-5.1`)
 - `--outdir` Output dir for artifacts (default: `./out`)
 - `--url` Target site (default: `johnmaconline.com`)
 
 Notes:
-- The LLM can suggest categories and tags. Categories are capped at 4.
+- The LLM can suggest categories and tags. Categories are capped at 4 and limited to AI, Leadership, Technology, Human.
 - `The250` is always added automatically and must exist on the site.
 - Tags are capped at 8 and missing tags are created automatically.
 - Existing tags are provided to the LLM (capped at 50 by usage count).

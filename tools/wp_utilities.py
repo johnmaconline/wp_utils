@@ -1236,9 +1236,9 @@ def build_schedule_payload(url, headers, content_md, meta, tz_name=DEFAULT_TIMEZ
     optional_categories = [name for name in categories if name.lower() != 'the250']
     category_ids = []
     if required_categories:
-        category_ids.extend(resolve_term_ids(url, headers, 'categories', required_categories))
+        category_ids.extend(resolve_term_ids(url, headers, 'categories', required_categories, create_missing=True))
     if optional_categories:
-        category_ids.extend(resolve_term_ids(url, headers, 'categories', optional_categories, warn_missing=True))
+        category_ids.extend(resolve_term_ids(url, headers, 'categories', optional_categories, create_missing=True))
     tags = meta.get('tags') or []
     if isinstance(tags, str):
         tags = [tags]
@@ -1287,23 +1287,86 @@ def build_schedule_payload(url, headers, content_md, meta, tz_name=DEFAULT_TIMEZ
     )
     if focus_keyphrase:
         yoast_meta['yoast_wpseo_focuskw'] = focus_keyphrase
+        yoast_meta['_yoast_wpseo_focuskw'] = focus_keyphrase
     if meta_description:
         yoast_meta['yoast_wpseo_metadesc'] = meta_description
+        yoast_meta['_yoast_wpseo_metadesc'] = meta_description
     if yoast_meta:
         payload['meta'] = yoast_meta
 
     return payload, schedule_dt
 
 
-def schedule_post_wp_api(url, headers, content_md, meta, dry_run=False, preview=False, tz_name=DEFAULT_TIMEZONE):
+def find_post_by_slug(url, headers, slug):
+    if not slug:
+        return None
+    base = build_wp_api_base(url)
+    if not base:
+        log.error("Invalid URL for WordPress API.")
+        return None
+    params = {
+        'slug': slug,
+        'per_page': 1,
+        'status': 'any',
+    }
+    if headers.get('Authorization'):
+        params['context'] = 'edit'
+    posts_url = f"{base.rstrip('/')}/wp-json/wp/v2/posts"
+    response = requests.get(posts_url, headers=headers, params=params)
+    if response.status_code >= 400:
+        log.error(f"Failed to find post by slug '{slug}': {response.status_code} {response.text}")
+        return None
+    data = response.json()
+    if isinstance(data, list) and data:
+        return data[0]
+    return None
+
+
+def _confirm_update(existing, slug, force=False):
+    if force:
+        return True
+    post_id = existing.get('id')
+    status = existing.get('status') or ''
+    date_val = existing.get('date') or ''
+    prompt = f"Post with slug '{slug}' exists (id={post_id}, status={status}, date={date_val}). Update? [y/N]: "
+    try:
+        resp = input(prompt)
+    except EOFError:
+        return False
+    return resp.strip().lower() in ('y', 'yes')
+
+
+def schedule_post_wp_api(url, headers, content_md, meta, dry_run=False, preview=False, tz_name=DEFAULT_TIMEZONE, force=False):
     payload, schedule_dt = build_schedule_payload(url, headers, content_md, meta, tz_name)
+    existing = find_post_by_slug(url, headers, payload.get('slug', ''))
+    if existing:
+        if not _confirm_update(existing, payload.get('slug', ''), force=force):
+            log.info('Update cancelled by user.')
+            existing_date = existing.get('date') or schedule_dt.isoformat()
+            return {
+                'action': 'skipped',
+                'scheduled_for': existing_date,
+                'payload': payload,
+                'post': existing
+            }
+        if existing.get('status'):
+            payload['status'] = existing.get('status')
+        if existing.get('date'):
+            payload['date'] = existing.get('date')
+            schedule_dt = datetime.fromisoformat(existing.get('date'))
     if dry_run:
         return {
             'scheduled_for': schedule_dt.isoformat(),
+            'action': 'update' if existing else 'create',
             'payload': payload
         }
     posts_url = build_wp_api_posts_url(url)
-    response = requests.post(posts_url, headers=headers, json=payload)
+    if existing:
+        post_id = existing.get('id')
+        update_url = posts_url.rstrip('/') + f'/{post_id}'
+        response = requests.post(update_url, headers=headers, json=payload)
+    else:
+        response = requests.post(posts_url, headers=headers, json=payload)
     if response.status_code >= 400:
         raise ValueError(f"Post schedule failed: {response.status_code} {response.text}")
     post = response.json()
@@ -1311,6 +1374,7 @@ def schedule_post_wp_api(url, headers, content_md, meta, dry_run=False, preview=
         return {
             'post': post,
             'scheduled_for': schedule_dt.isoformat(),
+            'action': 'update' if existing else 'create',
             'payload': payload
         }
     return post
@@ -1658,6 +1722,10 @@ def handle_args():
         action='store_true',
         help='Show planned changes without making updates (used with --schedule-post).')
     parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Skip confirmation prompts (used with --schedule-post).')
+    parser.add_argument(
         '--preview',
         action='store_true',
         help='Print the final scheduled post payload (used with --schedule-post).')
@@ -1828,6 +1896,8 @@ def handle_args():
             log.info('+  Dry run enabled (no post will be created)')
         if args.preview:
             log.info('+  Preview enabled (payload will be printed)')
+        if args.force:
+            log.info('+  Force enabled (skip update prompts)')
     if args.get_posts:
         log.info('+  Fetching posts via WP API')
         log.info(f'+  Target URL: {args.url}')
@@ -2009,13 +2079,22 @@ def main():
                     meta,
                     dry_run=True,
                     preview=args.preview,
-                    tz_name=DEFAULT_TIMEZONE
+                    tz_name=DEFAULT_TIMEZONE,
+                    force=args.force
                 )
-                if args.preview:
-                    print(json.dumps(result.get('payload', {}), indent=2))
-                scheduled_for = result.get('scheduled_for')
-                post_id = ''
-                link = ''
+                action = result.get('action')
+                if action == 'skipped':
+                    log.info('Update skipped.')
+                    post = result.get('post', {})
+                    scheduled_for = result.get('scheduled_for')
+                    post_id = post.get('id') or ''
+                    link = post.get('link') or ''
+                else:
+                    if args.preview:
+                        print(json.dumps(result.get('payload', {}), indent=2))
+                    scheduled_for = result.get('scheduled_for')
+                    post_id = ''
+                    link = ''
             else:
                 content_md, uploads = upload_media_and_replace(content_md, base_dir, args.url, headers)
                 if uploads:
@@ -2027,13 +2106,19 @@ def main():
                     meta,
                     dry_run=False,
                     preview=args.preview,
-                    tz_name=DEFAULT_TIMEZONE
+                    tz_name=DEFAULT_TIMEZONE,
+                    force=args.force
                 )
-                if args.preview:
-                    print(json.dumps(result.get('payload', {}), indent=2))
+                action = result.get('action')
+                if action == 'skipped':
+                    log.info('Update skipped.')
                     post = result.get('post', {})
                 else:
-                    post = result
+                    if args.preview:
+                        print(json.dumps(result.get('payload', {}), indent=2))
+                        post = result.get('post', {})
+                    else:
+                        post = result
                 scheduled_for = post.get('date') or result.get('scheduled_for')
                 post_id = post.get('id')
                 link = post.get('link') or ''
@@ -2046,7 +2131,8 @@ def main():
                 'post_id': post_id or '',
                 'link': link,
                 'media_uploaded': len(uploads),
-                'dry_run': str(bool(args.dry_run))
+                'dry_run': str(bool(args.dry_run)),
+                'action': action or ''
             }
             results_rows.append(row)
             op_counts['schedule-post'] = 1

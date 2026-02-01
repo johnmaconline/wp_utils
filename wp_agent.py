@@ -36,6 +36,7 @@ PROMPT_PATH = Path('wp_meta_prompt.md')
 CATEGORY_LIMIT = 4
 TAG_LIMIT = 8
 TAG_CONTEXT_LIMIT = 50
+ALLOWED_CATEGORIES = ['AI', 'Leadership', 'Technology', 'Human']
 
 # Simple price table (USD per 1M tokens)
 PRICE_TABLE_DEFAULT = {
@@ -135,7 +136,7 @@ def _expand_md_list(raw_list: list[str]) -> list[str]:
 def _slugify(text: str, default: str = 'post') -> str:
     if not text:
         return default
-    slug = re.sub(r'[^A-Za-z0-9]+', '_', text)
+    slug = re.sub(r'[^A-Za-z0-9]+', '_', text).lower()
     slug = re.sub(r'_+', '_', slug).strip('_')
     return slug[:80] or default
 
@@ -159,12 +160,6 @@ def _load_prompt(path: Path) -> str:
 
 
 def _ensure_unique_dir(path: Path) -> Path:
-    if not path.exists():
-        return path
-    for i in range(2, 1000):
-        candidate = Path(f"{path}_{i}")
-        if not candidate.exists():
-            return candidate
     return path
 
 
@@ -293,14 +288,27 @@ def _dedup_list(values: list[str]) -> list[str]:
     return out
 
 
+def _normalize_categories(categories: list[str]) -> list[str]:
+    allowed_map = {c.lower(): c for c in ALLOWED_CATEGORIES}
+    out: list[str] = []
+    for cat in categories:
+        key = cat.strip().lower()
+        if key in allowed_map:
+            out.append(allowed_map[key])
+        else:
+            log.warning(f'Category not allowed, skipping: {cat}')
+    return _dedup_list(out)
+
+
 def normalize_meta(llm_json: dict[str, Any], default_title: str) -> dict[str, Any]:
-    title = (llm_json.get('title') or '').strip() or default_title
+    title = default_title or (llm_json.get('title') or '').strip()
     excerpt = (llm_json.get('excerpt') or '').strip()
     categories = llm_json.get('categories') or []
     if isinstance(categories, str):
         categories = [categories]
     categories = _dedup_list([str(c) for c in categories if str(c).strip()])
     categories = [c for c in categories if c.lower() != 'the250']
+    categories = _normalize_categories(categories)
     if len(categories) > CATEGORY_LIMIT:
         log.warning(f'Categories over limit ({CATEGORY_LIMIT}); truncating.')
         categories = categories[:CATEGORY_LIMIT]
@@ -334,6 +342,7 @@ def normalize_user_meta(meta: dict[str, Any], default_title: str) -> dict[str, A
         categories = [categories]
     categories = _dedup_list([str(c) for c in categories if str(c).strip()])
     categories = [c for c in categories if c.lower() != 'the250']
+    categories = _normalize_categories(categories)
     if len(categories) > CATEGORY_LIMIT:
         log.warning(f'Categories over limit ({CATEGORY_LIMIT}); truncating.')
         categories = categories[:CATEGORY_LIMIT]
@@ -391,6 +400,7 @@ def build_llm_payload(markdown_text: str, categories: list[str], tags: list[str]
         'existing_tags': tags,
         'category_limit': CATEGORY_LIMIT,
         'tag_limit': TAG_LIMIT,
+        'allowed_categories': ALLOWED_CATEGORIES,
         'notes': {
             'always_add_category': 'The250',
             'categories_limit': CATEGORY_LIMIT,
@@ -440,6 +450,11 @@ def handle_args():
         '--preview',
         action='store_true',
         help='Print the final WordPress payload for each post.'
+    )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Skip confirmation prompts when updating existing posts.'
     )
     parser.add_argument(
         '--llm-model',
@@ -492,6 +507,8 @@ def handle_args():
         log.info('+  Dry run enabled (no publish)')
     if args.preview:
         log.info('+  Preview enabled (payload printed)')
+    if args.force:
+        log.info('+  Force enabled (skip update prompts)')
     log.info(f'+  Output directory: {args.outdir}')
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
 
@@ -632,8 +649,12 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
                 meta,
                 dry_run=True,
                 preview=args.preview,
-                tz_name=wpu.DEFAULT_TIMEZONE
+                tz_name=wpu.DEFAULT_TIMEZONE,
+                force=args.force
             )
+            if payload.get('action') == 'skipped':
+                log.info('Update skipped.')
+                continue
             if args.preview:
                 print(json.dumps(payload.get('payload', {}), indent=2))
             (out_dir / 'final_payload.json').write_text(
@@ -651,8 +672,12 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
                 meta,
                 dry_run=False,
                 preview=args.preview,
-                tz_name=wpu.DEFAULT_TIMEZONE
+                tz_name=wpu.DEFAULT_TIMEZONE,
+                force=args.force
             )
+            if result.get('action') == 'skipped':
+                log.info('Update skipped.')
+                continue
             if args.preview:
                 print(json.dumps(result.get('payload', {}), indent=2))
                 post = result.get('post', {})
