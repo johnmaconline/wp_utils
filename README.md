@@ -135,6 +135,7 @@ Examples:
 Agentic workflow (Google ADK style) for WordPress publishing. Uses OpenAI to generate metadata JSON
 and then schedules the post using the same wp_utilities toolset.
 Prompt template: `wp_meta_prompt.md`
+Suggestion prompt: `wp_suggest_prompt.md`
 
 Prereqs:
 ```bash
@@ -154,14 +155,25 @@ WP_APP_PASSWORD=xxxx xxxx xxxx xxxx xxxx
 Args:
 - `--content-md` Markdown file(s) to publish (accepts globs and lists)
 - `--invoke-llm` Call OpenAI to generate metadata JSON
+- `--suggest` Suggest 10 topic ideas for the next article (LLM). Uses `--url` as input.
 - `--meta-json` Use existing metadata JSON (skip LLM generation)
 - `--schedule/--no-schedule` Schedule posts after metadata (default: true)
 - `--dry-run` No publish
 - `--preview` Print the final WordPress payload
 - `--force` Skip confirmation prompts when updating existing posts
 - `--llm-model` OpenAI model (default from `WP_AGENT_LLM_MODEL` or `gpt-5.1`)
+- `--minimize-cost` Auto-select the lowest estimated cost model for the operation (overrides `--llm-model`)
 - `--outdir` Output dir for artifacts (default: `./out`)
 - `--url` Target site (default: `johnmaconline.com`)
+- `--outfile` Output file base name for suggestions (defaults to out.<format> if omitted)
+- `--outfile-format` Output format for suggestions file: `json` or `csv` (default: `json`)
+
+Pricing estimates (used by `wp_agent.py` for cost logging, USD per 1M tokens, input/output; OpenAI API pricing as of 2026-02-02):
+- `gpt-5.2`: $1.75 / $14.00
+- `gpt-5.2-chat-latest`: $1.75 / $14.00
+- `gpt-5.1`: $1.25 / $10.00
+- `gpt-4o`: $2.50 / $10.00
+- `gpt-4o-mini`: $0.15 / $0.60
 
 Notes:
 - The LLM can suggest categories and tags. Categories are capped at 4 and limited to AI, Leadership, Technology, Human.
@@ -170,6 +182,7 @@ Notes:
 - Existing tags are provided to the LLM (capped at 50 by usage count).
 - If `--invoke-llm` is omitted, a stub `meta.json` is written and no publish occurs.
 - Yoast fields supported via LLM output: `focus_keyphrase`, `meta_description` (<=160 chars).
+- `--minimize-cost` picks the lowest estimated total cost using the local pricing table and a fixed output-size estimate per operation.
 
 Example:
 ```bash

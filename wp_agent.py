@@ -17,12 +17,15 @@ import os
 import re
 import sys
 import time
+import csv
 from datetime import date
 from pathlib import Path
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from openai import OpenAI
+import requests
+from bs4 import BeautifulSoup
 
 from tools import wp_utilities as wpu
 
@@ -33,6 +36,7 @@ OUT_DIR = Path('./out')
 L_DEFAULT_MODEL = os.environ.get('WP_AGENT_LLM_MODEL', 'gpt-5.1')
 DEFAULT_URL = 'johnmaconline.com'
 PROMPT_PATH = Path('wp_meta_prompt.md')
+SUGGEST_PROMPT_PATH = Path('wp_suggest_prompt.md')
 CATEGORY_LIMIT = 4
 TAG_LIMIT = 8
 TAG_CONTEXT_LIMIT = 50
@@ -40,9 +44,25 @@ ALLOWED_CATEGORIES = ['AI', 'Leadership', 'Technology', 'Human']
 
 # Simple price table (USD per 1M tokens)
 PRICE_TABLE_DEFAULT = {
-    'gpt-5.1': {'in_per_m': 2.50, 'out_per_m': 10.00},
+    'gpt-5.2': {'in_per_m': 1.75, 'out_per_m': 14.00},
+    'gpt-5.2-chat-latest': {'in_per_m': 1.75, 'out_per_m': 14.00},
+    'gpt-5.1': {'in_per_m': 1.25, 'out_per_m': 10.00},
     'gpt-4o': {'in_per_m': 2.50, 'out_per_m': 10.00},
     'gpt-4o-mini': {'in_per_m': 0.15, 'out_per_m': 0.60},
+}
+
+SAMPLE_OUTPUTS = {
+    'metadata': {
+        'title': 'Example title about practical AI leadership',
+        'excerpt': 'A concise two-sentence excerpt that summarizes the article for readers.',
+        'categories': ['AI', 'Leadership', 'Technology', 'Human'],
+        'tags': ['ai', 'leadership', 'workflow', 'automation', 'productivity', 'writing', 'tools', 'strategy'],
+        'focus_keyphrase': 'practical AI leadership',
+        'meta_description': 'A short meta description that includes the focus keyphrase near the start.',
+    },
+    'suggest': {
+        'topics': [{'title': 'Example topic title about practical AI leadership', 'category': 'AI'}] * 10
+    },
 }
 
 # ========================================================================================
@@ -141,6 +161,48 @@ def _slugify(text: str, default: str = 'post') -> str:
     return slug[:80] or default
 
 
+def _slug_from_url(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        base = f"{parsed.netloc}{parsed.path}"
+    except Exception:
+        base = url
+    return _slugify(base, default='url')
+
+
+def _normalize_url(url: str) -> str:
+    url = (url or '').strip()
+    if not url:
+        return ''
+    if not re.match(r'^https?://', url, re.IGNORECASE):
+        url = f'https://{url}'
+    return url
+
+
+def _extract_title_from_text(text: str, fallback: str) -> str:
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return fallback
+
+
+def _fetch_url_text(url: str, timeout: int = 20) -> str:
+    url = _normalize_url(url)
+    if not url:
+        return ''
+    headers = {'User-Agent': 'wp-agent/1.0'}
+    response = requests.get(url, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, 'html.parser')
+    title = soup.title.get_text(' ', strip=True) if soup.title else ''
+    paragraphs = [p.get_text(' ', strip=True) for p in soup.find_all('p')]
+    paragraphs = [p for p in paragraphs if p]
+    parts = [title] if title else []
+    parts.extend(paragraphs)
+    return "\n\n".join(parts).strip()
+
+
 def _extract_h1_title(markdown_text: str) -> str:
     for line in markdown_text.splitlines():
         if not line.strip():
@@ -179,28 +241,69 @@ def safe_json_loads(text: str) -> dict[str, Any]:
     return {}
 
 
-def estimate_tokens_and_cost(model: str, prompt_text: str, user_payload: dict[str, Any]) -> tuple[int, float]:
+def _estimate_text_tokens(model: str, text: str) -> int:
     try:
         import tiktoken  # type: ignore
     except Exception:
         tiktoken = None
 
     if not tiktoken:
-        user_str = json.dumps(user_payload, ensure_ascii=False)
-        total_in = max(1, int((len(prompt_text or '') + len(user_str)) / 4))
-        price = PRICE_TABLE_DEFAULT.get(model) or {}
-        in_rate = price.get('in_per_m', 0)
-        cost = (total_in / 1_000_000) * in_rate if in_rate else 0
-        return total_in, cost
+        return max(1, int(len(text or '') / 4))
 
     try:
         enc = tiktoken.encoding_for_model(model)
     except Exception:
         enc = tiktoken.get_encoding('cl100k_base')
-    prompt_tokens = len(enc.encode(prompt_text or ''))
+    return len(enc.encode(text or ''))
+
+
+def _estimate_input_tokens(model: str, prompt_text: str, user_payload: dict[str, Any]) -> int:
     user_str = json.dumps(user_payload, ensure_ascii=False)
-    user_tokens = len(enc.encode(user_str))
-    total_in = prompt_tokens + user_tokens
+    prompt_tokens = _estimate_text_tokens(model, prompt_text or '')
+    user_tokens = _estimate_text_tokens(model, user_str)
+    return prompt_tokens + user_tokens
+
+
+def _estimate_output_tokens(model: str, operation: str) -> int:
+    sample = SAMPLE_OUTPUTS.get(operation)
+    if not sample:
+        return 0
+    sample_text = json.dumps(sample, ensure_ascii=False)
+    return _estimate_text_tokens(model, sample_text)
+
+
+def _select_min_cost_model(prompt_text: str, user_payload: dict[str, Any], operation: str, preferred_model: str) -> tuple[str, dict[str, Any]]:
+    if not PRICE_TABLE_DEFAULT:
+        return preferred_model, {}
+
+    candidates = []
+    for model, price in PRICE_TABLE_DEFAULT.items():
+        in_rate = price.get('in_per_m', 0)
+        out_rate = price.get('out_per_m', 0)
+        if not in_rate and not out_rate:
+            continue
+        in_tokens = _estimate_input_tokens(model, prompt_text, user_payload)
+        out_tokens = _estimate_output_tokens(model, operation)
+        in_cost = (in_tokens / 1_000_000) * in_rate if in_rate else 0
+        out_cost = (out_tokens / 1_000_000) * out_rate if out_rate else 0
+        candidates.append({
+            'model': model,
+            'input_tokens': in_tokens,
+            'output_tokens': out_tokens,
+            'total_cost': in_cost + out_cost,
+            'input_cost': in_cost,
+            'output_cost': out_cost,
+        })
+    if not candidates:
+        return preferred_model, {}
+
+    candidates.sort(key=lambda c: (c['total_cost'], 0 if c['model'] == preferred_model else 1, c['model']))
+    chosen = candidates[0]
+    return chosen['model'], chosen
+
+
+def estimate_tokens_and_cost(model: str, prompt_text: str, user_payload: dict[str, Any]) -> tuple[int, float]:
+    total_in = _estimate_input_tokens(model, prompt_text, user_payload)
     price = PRICE_TABLE_DEFAULT.get(model) or {}
     in_rate = price.get('in_per_m', 0)
     cost = (total_in / 1_000_000) * in_rate if in_rate else 0
@@ -410,6 +513,37 @@ def build_llm_payload(markdown_text: str, categories: list[str], tags: list[str]
     }
 
 
+def build_suggest_payload(markdown_text: str, categories: list[str], tags: list[str]) -> dict[str, Any]:
+    return {
+        'markdown': markdown_text,
+        'existing_categories': categories,
+        'existing_tags': tags,
+        'allowed_categories': ALLOWED_CATEGORIES,
+        'topic_count': 10
+    }
+
+
+def _write_suggestions_output(path: Path, fmt: str, suggest_output: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    topics = suggest_output.get('topics') or []
+    if fmt == 'csv':
+        with open(path, 'w', newline='') as file:
+            writer = csv.DictWriter(file, fieldnames=['title', 'category'])
+            writer.writeheader()
+            for item in topics:
+                if isinstance(item, dict):
+                    writer.writerow({
+                        'title': item.get('title', ''),
+                        'category': item.get('category', ''),
+                    })
+                else:
+                    writer.writerow({'title': str(item), 'category': ''})
+        return path
+    with open(path, 'w') as file:
+        json.dump(suggest_output, file, indent=2)
+    return path
+
+
 def handle_args():
     wpu.load_dotenv()
     parser = argparse.ArgumentParser(
@@ -418,7 +552,6 @@ def handle_args():
     parser.add_argument(
         '--content-md',
         nargs='+',
-        required=True,
         help='Markdown file(s) to publish (supports globs).'
     )
     parser.add_argument(
@@ -430,6 +563,11 @@ def handle_args():
         '--invoke-llm',
         action='store_true',
         help='Use OpenAI to generate metadata JSON.'
+    )
+    parser.add_argument(
+        '--suggest',
+        action='store_true',
+        help='Suggest 10 topic ideas for the next article (LLM).'
     )
     parser.add_argument(
         '--meta-json',
@@ -462,9 +600,26 @@ def handle_args():
         help=f'OpenAI model to use [default: {L_DEFAULT_MODEL}]'
     )
     parser.add_argument(
+        '--minimize-cost',
+        action='store_true',
+        help='Auto-select the lowest estimated cost model for the operation (overrides --llm-model).'
+    )
+    parser.add_argument(
         '--outdir',
         default=str(OUT_DIR),
         help='Output directory for artifacts [default: ./out]'
+    )
+    parser.add_argument(
+        '--outfile',
+        nargs='?',
+        const='',
+        help='Output file base name for suggestions (defaults to out.<format> if omitted)'
+    )
+    parser.add_argument(
+        '--outfile-format',
+        choices=['json', 'csv'],
+        default='json',
+        help='Output format for suggestions file [default: json]'
     )
     parser.add_argument(
         '--wp-username',
@@ -500,6 +655,8 @@ def handle_args():
     log.info(f'+  Target URL: {args.url}')
     log.info(f'+  Content inputs: {args.content_md}')
     log.info(f'+  Invoke LLM: {args.invoke_llm}')
+    if args.suggest:
+        log.info('+  Suggest enabled (topic ideas only)')
     if args.meta_json:
         log.info(f'+  Meta JSON: {args.meta_json}')
     log.info(f'+  Schedule: {args.schedule}')
@@ -509,6 +666,8 @@ def handle_args():
         log.info('+  Preview enabled (payload printed)')
     if args.force:
         log.info('+  Force enabled (skip update prompts)')
+    if args.minimize_cost:
+        log.info('+  Minimize cost enabled (auto-select model)')
     log.info(f'+  Output directory: {args.outdir}')
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
 
@@ -521,14 +680,20 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
     if args.meta_json and args.invoke_llm:
         log.info('Meta JSON provided; skipping LLM generation.')
         args.invoke_llm = False
-    if args.invoke_llm:
+    if args.suggest and args.schedule:
+        log.info('Suggestion mode enabled; skipping publish steps.')
+        args.schedule = False
+    if args.invoke_llm or args.suggest:
         llm_info = _init_llm_backend()
         if llm_info.get('status') != 'ok':
             return 2, {}
 
-    md_list = _expand_md_list(args.content_md)
-    if not md_list:
-        log.error('No markdown inputs found.')
+    md_list = _expand_md_list(args.content_md) if args.content_md else []
+    if args.suggest and args.content_md:
+        log.info('Suggest mode uses --url as input; ignoring --content-md.')
+        md_list = []
+    if not md_list and not args.suggest:
+        log.error('No markdown inputs found. Provide --content-md.')
         return 2, {}
 
     headers = {
@@ -544,9 +709,13 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
     prompt_text = _load_prompt(PROMPT_PATH)
     if args.invoke_llm and not prompt_text:
         return 2, {}
+    suggest_prompt = _load_prompt(SUGGEST_PROMPT_PATH) if args.suggest else ''
+    if args.suggest and not suggest_prompt:
+        return 2, {}
 
-    existing_categories = fetch_category_context(args.url, headers) if args.invoke_llm else []
-    existing_tags = fetch_tag_context(args.url, headers) if args.invoke_llm else []
+    need_context = args.invoke_llm or args.suggest
+    existing_categories = fetch_category_context(args.url, headers) if need_context else []
+    existing_tags = fetch_tag_context(args.url, headers) if need_context else []
 
     total_cost = 0.0
     usage_totals = {
@@ -560,6 +729,7 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
         log.error('Using --meta-json with multiple markdown inputs is not supported.')
         return 2, {}
 
+    inputs = []
     for md_path in md_list:
         path = Path(md_path)
         if not path.exists():
@@ -568,12 +738,120 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
         markdown_text = path.read_text(encoding='utf-8')
         title_hint = _extract_h1_title(markdown_text) or path.stem
         slug = _slugify(title_hint, default=_slugify(path.stem))
+        inputs.append({
+            'source': md_path,
+            'text': markdown_text,
+            'title_hint': title_hint,
+            'slug': slug,
+            'base_dir': path.parent,
+        })
+    if args.suggest:
+        url_norm = _normalize_url(args.url)
+        if not url_norm:
+            log.error('Invalid --url for suggestions.')
+            return 2, {}
+        try:
+            text = _fetch_url_text(url_norm)
+        except Exception as exc:
+            log.error(f'Failed to fetch URL {url_norm}: {exc}')
+            return 2, {}
+        title_hint = _extract_title_from_text(text, url_norm)
+        slug = _slug_from_url(url_norm)
+        inputs.append({
+            'source': url_norm,
+            'text': text,
+            'title_hint': title_hint,
+            'slug': slug,
+            'base_dir': Path.cwd(),
+        })
+
+    for item in inputs:
+        markdown_text = item['text']
+        title_hint = item['title_hint']
+        slug = item['slug']
         out_dir = _ensure_unique_dir(Path(args.outdir) / slug)
         out_dir.mkdir(parents=True, exist_ok=True)
-
         (out_dir / 'input.md').write_text(markdown_text, encoding='utf-8')
         meta_path = out_dir / 'meta.json'
 
+        if args.suggest:
+            suggest_payload = build_suggest_payload(markdown_text, existing_categories, existing_tags)
+            suggest_input_path = out_dir / 'suggest_input.json'
+            suggest_input_path.write_text(json.dumps(suggest_payload, ensure_ascii=False, indent=2), encoding='utf-8')
+            log.info(f'Wrote suggestions input => {suggest_input_path}')
+
+            model_for_call = args.llm_model
+            if args.minimize_cost:
+                model_for_call, choice = _select_min_cost_model(
+                    suggest_prompt,
+                    suggest_payload,
+                    'suggest',
+                    args.llm_model
+                )
+                if choice:
+                    log.info(
+                        f'+  Minimize cost: operation=suggest, model={model_for_call}, '
+                        f'input_tokens={choice["input_tokens"]}, output_tokens={choice["output_tokens"]}, '
+                        f'est_total_cost=${choice["total_cost"]:.6f}'
+                    )
+            est_tokens, est_cost = estimate_tokens_and_cost(model_for_call, suggest_prompt, suggest_payload)
+            suggest_output_path = out_dir / 'suggestions.json'
+            suggest_json, usage_info = _call_llm(suggest_prompt, suggest_payload, model_for_call, None)
+            usage_cost = _usage_cost(model_for_call, usage_info, est_tokens, est_cost)
+            if usage_cost.get('total_cost'):
+                total_cost += usage_cost.get('total_cost', 0) or 0
+            if usage_cost.get('prompt_tokens') is not None:
+                usage_totals['prompt_tokens'] += usage_cost.get('prompt_tokens') or 0
+            if usage_cost.get('completion_tokens') is not None:
+                usage_totals['completion_tokens'] += usage_cost.get('completion_tokens') or 0
+            if usage_cost.get('estimated_input_tokens') is not None:
+                usage_totals['estimated_input_tokens'] += usage_cost.get('estimated_input_tokens') or 0
+            if usage_cost.get('estimated_input_cost') is not None:
+                usage_totals['estimated_input_cost'] += usage_cost.get('estimated_input_cost') or 0.0
+            suggest_output = {
+                'model': model_for_call,
+                'usage': usage_cost,
+                'topics': suggest_json.get('topics', suggest_json)
+            }
+            suggest_output_path.write_text(json.dumps(suggest_output, ensure_ascii=False, indent=2), encoding='utf-8')
+            log.info(f'Wrote suggestions => {suggest_output_path}')
+            print(json.dumps(suggest_output, ensure_ascii=False, indent=2))
+            outfile = args.outfile or f"out.{args.outfile_format}"
+            out_path = Path(outfile)
+            if not out_path.suffix:
+                out_path = Path(f"{outfile}.{args.outfile_format}")
+            file_path = _write_suggestions_output(out_path, args.outfile_format, suggest_output)
+            log.info(f'Wrote suggestions file => {file_path}')
+            continue
+        if args.suggest:
+            suggest_payload = build_suggest_payload(markdown_text, existing_categories, existing_tags)
+            suggest_input_path = out_dir / 'suggest_input.json'
+            suggest_input_path.write_text(json.dumps(suggest_payload, ensure_ascii=False, indent=2), encoding='utf-8')
+            log.info(f'Wrote suggestions input => {suggest_input_path}')
+
+            est_tokens, est_cost = estimate_tokens_and_cost(args.llm_model, suggest_prompt, suggest_payload)
+            suggest_output_path = out_dir / 'suggestions.json'
+            suggest_json, usage_info = _call_llm(suggest_prompt, suggest_payload, args.llm_model, None)
+            usage_cost = _usage_cost(args.llm_model, usage_info, est_tokens, est_cost)
+            if usage_cost.get('total_cost'):
+                total_cost += usage_cost.get('total_cost', 0) or 0
+            if usage_cost.get('prompt_tokens') is not None:
+                usage_totals['prompt_tokens'] += usage_cost.get('prompt_tokens') or 0
+            if usage_cost.get('completion_tokens') is not None:
+                usage_totals['completion_tokens'] += usage_cost.get('completion_tokens') or 0
+            if usage_cost.get('estimated_input_tokens') is not None:
+                usage_totals['estimated_input_tokens'] += usage_cost.get('estimated_input_tokens') or 0
+            if usage_cost.get('estimated_input_cost') is not None:
+                usage_totals['estimated_input_cost'] += usage_cost.get('estimated_input_cost') or 0.0
+            suggest_output = {
+                'model': args.llm_model,
+                'usage': usage_cost,
+                'topics': suggest_json.get('topics', suggest_json)
+            }
+            suggest_output_path.write_text(json.dumps(suggest_output, ensure_ascii=False, indent=2), encoding='utf-8')
+            log.info(f'Wrote suggestions => {suggest_output_path}')
+            print(json.dumps(suggest_output, ensure_ascii=False, indent=2))
+            continue
         if args.meta_json:
             meta_src = Path(args.meta_json)
             if not meta_src.exists():
@@ -596,13 +874,27 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
             llm_input_path.write_text(json.dumps(llm_payload, ensure_ascii=False, indent=2), encoding='utf-8')
             log.info(f'Wrote LLM input => {llm_input_path}')
 
-            est_tokens, est_cost = estimate_tokens_and_cost(args.llm_model, prompt_text, llm_payload)
+            model_for_call = args.llm_model
+            if args.minimize_cost:
+                model_for_call, choice = _select_min_cost_model(
+                    prompt_text,
+                    llm_payload,
+                    'metadata',
+                    args.llm_model
+                )
+                if choice:
+                    log.info(
+                        f'+  Minimize cost: operation=metadata, model={model_for_call}, '
+                        f'input_tokens={choice["input_tokens"]}, output_tokens={choice["output_tokens"]}, '
+                        f'est_total_cost=${choice["total_cost"]:.6f}'
+                    )
+            est_tokens, est_cost = estimate_tokens_and_cost(model_for_call, prompt_text, llm_payload)
             llm_output_path = out_dir / 'llm_output.json'
-            llm_json, usage_info = _call_llm(prompt_text, llm_payload, args.llm_model, None)
-            usage_cost = _usage_cost(args.llm_model, usage_info, est_tokens, est_cost)
+            llm_json, usage_info = _call_llm(prompt_text, llm_payload, model_for_call, None)
+            usage_cost = _usage_cost(model_for_call, usage_info, est_tokens, est_cost)
 
             llm_output = {
-                'model': args.llm_model,
+                'model': model_for_call,
                 'output': llm_json,
                 'usage': usage_cost,
             }
@@ -640,7 +932,7 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
             continue
 
         content_for_publish = wpu.strip_leading_h1(markdown_text)
-        base_dir = path.parent
+        base_dir = item['base_dir']
         if args.dry_run:
             payload = wpu.schedule_post_wp_api(
                 args.url,
