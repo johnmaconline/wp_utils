@@ -11,6 +11,7 @@
 ##########################################################################################
 
 import argparse
+import atexit
 import json
 import logging
 import os
@@ -41,12 +42,47 @@ CATEGORY_LIMIT = 4
 TAG_LIMIT = 8
 TAG_CONTEXT_LIMIT = 50
 ALLOWED_CATEGORIES = ['AI', 'Leadership', 'Technology', 'Human']
+QUALITY_PROFILE_DEFAULT = 'balanced'
+QUALITY_PROFILE_RULES = {
+    'strict': {
+        'min_tags': 4,
+        'require_excerpt': True,
+        'require_focus_keyphrase': True,
+        'require_meta_description': True,
+        'require_focus_in_meta': True,
+        'meta_description_min_len': 120,
+        'meta_description_max_len': 160,
+    },
+    'balanced': {
+        'min_tags': 3,
+        'require_excerpt': True,
+        'require_focus_keyphrase': True,
+        'require_meta_description': True,
+        'require_focus_in_meta': True,
+        'meta_description_min_len': 0,
+        'meta_description_max_len': 160,
+    },
+    'loose': {
+        'min_tags': 1,
+        'require_excerpt': False,
+        'require_focus_keyphrase': False,
+        'require_meta_description': True,
+        'require_focus_in_meta': False,
+        'meta_description_min_len': 0,
+        'meta_description_max_len': 160,
+    },
+}
 
-# Simple price table (USD per 1M tokens)
+# Simple price table (USD per 1M tokens, standard processing)
 PRICE_TABLE_DEFAULT = {
+    'gpt-5-nano': {'in_per_m': 0.05, 'out_per_m': 0.40},
+    'gpt-5-mini': {'in_per_m': 0.25, 'out_per_m': 2.00},
+    'gpt-5': {'in_per_m': 1.25, 'out_per_m': 10.00},
+    'gpt-5-chat-latest': {'in_per_m': 1.25, 'out_per_m': 10.00},
     'gpt-5.2': {'in_per_m': 1.75, 'out_per_m': 14.00},
     'gpt-5.2-chat-latest': {'in_per_m': 1.75, 'out_per_m': 14.00},
     'gpt-5.1': {'in_per_m': 1.25, 'out_per_m': 10.00},
+    'gpt-5.1-chat-latest': {'in_per_m': 1.25, 'out_per_m': 10.00},
     'gpt-4o': {'in_per_m': 2.50, 'out_per_m': 10.00},
     'gpt-4o-mini': {'in_per_m': 0.15, 'out_per_m': 0.60},
 }
@@ -62,6 +98,13 @@ SAMPLE_OUTPUTS = {
     },
     'suggest': {
         'topics': [{'title': 'Example topic title about practical AI leadership', 'category': 'AI'}] * 10
+    },
+}
+
+# Per-model call behavior overrides.
+MODEL_CALL_CAPABILITIES = {
+    'gpt-5-nano': {
+        'temperature': 1,
     },
 }
 
@@ -272,11 +315,11 @@ def _estimate_output_tokens(model: str, operation: str) -> int:
     return _estimate_text_tokens(model, sample_text)
 
 
-def _select_min_cost_model(prompt_text: str, user_payload: dict[str, Any], operation: str, preferred_model: str) -> tuple[str, dict[str, Any]]:
+def _rank_models_by_est_cost(prompt_text: str, user_payload: dict[str, Any], operation: str, preferred_model: str) -> list[dict[str, Any]]:
     if not PRICE_TABLE_DEFAULT:
-        return preferred_model, {}
+        return []
 
-    candidates = []
+    candidates: list[dict[str, Any]] = []
     for model, price in PRICE_TABLE_DEFAULT.items():
         in_rate = price.get('in_per_m', 0)
         out_rate = price.get('out_per_m', 0)
@@ -294,10 +337,14 @@ def _select_min_cost_model(prompt_text: str, user_payload: dict[str, Any], opera
             'input_cost': in_cost,
             'output_cost': out_cost,
         })
+    candidates.sort(key=lambda c: (c['total_cost'], 0 if c['model'] == preferred_model else 1, c['model']))
+    return candidates
+
+
+def _select_min_cost_model(prompt_text: str, user_payload: dict[str, Any], operation: str, preferred_model: str) -> tuple[str, dict[str, Any]]:
+    candidates = _rank_models_by_est_cost(prompt_text, user_payload, operation, preferred_model)
     if not candidates:
         return preferred_model, {}
-
-    candidates.sort(key=lambda c: (c['total_cost'], 0 if c['model'] == preferred_model else 1, c['model']))
     chosen = candidates[0]
     return chosen['model'], chosen
 
@@ -310,31 +357,63 @@ def estimate_tokens_and_cost(model: str, prompt_text: str, user_payload: dict[st
     return total_in, cost
 
 
+def _configured_temperature_for_model(model: str) -> int:
+    cfg = MODEL_CALL_CAPABILITIES.get(model) or {}
+    return int(cfg.get('temperature', 0))
+
+
+def _is_unsupported_temperature_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    return 'temperature' in msg and 'unsupported' in msg
+
+
+def _run_chat_completion(
+    client: OpenAI,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: int | None
+):
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        kwargs: dict[str, Any] = {
+            'model': model,
+            'messages': messages,
+            'timeout': 60,
+        }
+        if temperature is not None:
+            kwargs['temperature'] = temperature
+        future = ex.submit(client.chat.completions.create, **kwargs)
+        start = time.time()
+        while True:
+            try:
+                return future.result(timeout=10)
+            except TimeoutError:
+                elapsed = int(time.time() - start)
+                log.info(f'Still waiting on LLM return... {elapsed} seconds total')
+
+
 def _call_llm(prompt_text: str, user_payload: dict[str, Any], model: str, out_path: Path | None) -> tuple[dict[str, Any], dict[str, Any]]:
     client = OpenAI()
+    log.info(f'+  Using LLM model: {model}')
+    llm_temperature = _configured_temperature_for_model(model)
+    temperature_fallback = False
     est_tokens, est_cost = estimate_tokens_and_cost(model, prompt_text, user_payload)
-    log.debug(f'_call_llm: model={model}, est_tokens={est_tokens}, est_cost=${est_cost:.4f}')
+    log.debug(f'_call_llm: model={model}, temperature={llm_temperature}, est_tokens={est_tokens}, est_cost=${est_cost:.4f}')
     messages = [
         {'role': 'system', 'content': prompt_text},
         {'role': 'user', 'content': json.dumps(user_payload, ensure_ascii=False)},
     ]
     try:
-        start = time.time()
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(
-                client.chat.completions.create,
-                model=model,
-                messages=messages,
-                temperature=0,
-                timeout=60,
+        try:
+            resp = _run_chat_completion(client, model, messages, llm_temperature)
+        except Exception as first_err:
+            if not _is_unsupported_temperature_error(first_err):
+                raise
+            temperature_fallback = True
+            log.warning(
+                f'+  Model={model} rejected temperature={llm_temperature}; '
+                'retrying with API default temperature'
             )
-            while True:
-                try:
-                    resp = future.result(timeout=10)
-                    break
-                except TimeoutError:
-                    elapsed = int(time.time() - start)
-                    log.info(f'Still waiting on LLM return... {elapsed} seconds total')
+            resp = _run_chat_completion(client, model, messages, None)
         usage = getattr(resp, 'usage', None)
         content = (resp.choices[0].message.content or '').strip()
         parsed = safe_json_loads(content)
@@ -345,6 +424,7 @@ def _call_llm(prompt_text: str, user_payload: dict[str, Any], model: str, out_pa
         usage_info = {
             'prompt_tokens': getattr(usage, 'prompt_tokens', None) if usage else None,
             'completion_tokens': getattr(usage, 'completion_tokens', None) if usage else None,
+            'temperature_fallback': temperature_fallback,
         }
         return parsed, usage_info
     except Exception as e:
@@ -356,6 +436,7 @@ def _usage_cost(model: str, usage_info: dict[str, Any], est_tokens: int, est_cos
     price = PRICE_TABLE_DEFAULT.get(model) or {}
     in_rate = price.get('in_per_m', 0)
     out_rate = price.get('out_per_m', 0)
+    temp_fallback = bool(usage_info.get('temperature_fallback'))
     ptok = usage_info.get('prompt_tokens') or usage_info.get('input_tokens')
     ctok = usage_info.get('completion_tokens') or usage_info.get('output_tokens')
     if ptok is None and ctok is None:
@@ -364,7 +445,8 @@ def _usage_cost(model: str, usage_info: dict[str, Any], est_tokens: int, est_cos
             'completion_tokens': None,
             'estimated_input_tokens': est_tokens,
             'estimated_input_cost': est_cost,
-            'total_cost': est_cost
+            'total_cost': est_cost,
+            'temperature_fallback': temp_fallback,
         }
     ptok = ptok or 0
     ctok = ctok or 0
@@ -375,8 +457,22 @@ def _usage_cost(model: str, usage_info: dict[str, Any], est_tokens: int, est_cos
         'completion_tokens': ctok,
         'prompt_cost': in_cost,
         'completion_cost': out_cost,
-        'total_cost': in_cost + out_cost
+        'total_cost': in_cost + out_cost,
+        'temperature_fallback': temp_fallback,
     }
+
+
+def _accumulate_usage_totals(usage_totals: dict[str, Any], usage_cost: dict[str, Any]) -> None:
+    if usage_cost.get('prompt_tokens') is not None:
+        usage_totals['prompt_tokens'] += usage_cost.get('prompt_tokens') or 0
+    if usage_cost.get('completion_tokens') is not None:
+        usage_totals['completion_tokens'] += usage_cost.get('completion_tokens') or 0
+    if usage_cost.get('estimated_input_tokens') is not None:
+        usage_totals['estimated_input_tokens'] += usage_cost.get('estimated_input_tokens') or 0
+    if usage_cost.get('estimated_input_cost') is not None:
+        usage_totals['estimated_input_cost'] += usage_cost.get('estimated_input_cost') or 0.0
+    if usage_cost.get('temperature_fallback'):
+        usage_totals['temperature_fallback_calls'] += 1
 
 
 def _dedup_list(values: list[str]) -> list[str]:
@@ -435,6 +531,89 @@ def normalize_meta(llm_json: dict[str, Any], default_title: str) -> dict[str, An
         'focus_keyphrase': focus_keyphrase,
         'meta_description': meta_description,
     }
+
+
+def _metadata_quality_issues(meta: dict[str, Any], profile: str) -> list[str]:
+    issues: list[str] = []
+    rules = QUALITY_PROFILE_RULES.get(profile, QUALITY_PROFILE_RULES[QUALITY_PROFILE_DEFAULT])
+    title = (meta.get('title') or '').strip()
+    excerpt = (meta.get('excerpt') or '').strip()
+    categories = meta.get('categories') or []
+    tags = meta.get('tags') or []
+    focus_keyphrase = (meta.get('focus_keyphrase') or '').strip()
+    meta_description = (meta.get('meta_description') or '').strip()
+
+    if not title:
+        issues.append('missing title')
+    if rules.get('require_excerpt') and not excerpt:
+        issues.append('missing excerpt')
+    if not categories:
+        issues.append('missing categories')
+    min_tags = int(rules.get('min_tags') or 0)
+    if len(tags) < min_tags:
+        issues.append(f'fewer than {min_tags} tags')
+    if rules.get('require_focus_keyphrase') and not focus_keyphrase:
+        issues.append('missing focus_keyphrase')
+    if rules.get('require_meta_description') and not meta_description:
+        issues.append('missing meta_description')
+    max_meta_len = int(rules.get('meta_description_max_len') or 0)
+    if meta_description and max_meta_len and len(meta_description) > max_meta_len:
+        issues.append(f'meta_description > {max_meta_len} chars')
+    min_meta_len = int(rules.get('meta_description_min_len') or 0)
+    if meta_description and min_meta_len and len(meta_description) < min_meta_len:
+        issues.append(f'meta_description < {min_meta_len} chars')
+    if (
+        rules.get('require_focus_in_meta')
+        and focus_keyphrase
+        and meta_description
+        and focus_keyphrase.lower() not in meta_description.lower()
+    ):
+        issues.append('meta_description missing focus_keyphrase')
+    return issues
+
+
+def _call_llm_min_cost_with_quality(
+    prompt_text: str,
+    user_payload: dict[str, Any],
+    preferred_model: str,
+    default_title: str,
+    quality_profile: str
+) -> tuple[dict[str, Any], str, list[dict[str, Any]], dict[str, Any], list[str]]:
+    ranked = _rank_models_by_est_cost(prompt_text, user_payload, 'metadata', preferred_model)
+    candidate_models = [c['model'] for c in ranked]
+    if preferred_model not in candidate_models:
+        candidate_models.insert(0, preferred_model)
+    if not candidate_models:
+        candidate_models = [preferred_model]
+
+    attempts: list[dict[str, Any]] = []
+    last_json: dict[str, Any] = {}
+    last_usage: dict[str, Any] = {}
+    last_issues: list[str] = ['no successful LLM output']
+    accepted_model = candidate_models[-1]
+
+    for model in candidate_models:
+        est_tokens, est_cost = estimate_tokens_and_cost(model, prompt_text, user_payload)
+        llm_json, usage_info = _call_llm(prompt_text, user_payload, model, None)
+        usage_cost = _usage_cost(model, usage_info, est_tokens, est_cost)
+        normalized = normalize_meta(llm_json, default_title)
+        issues = _metadata_quality_issues(normalized, quality_profile)
+        attempts.append({
+            'model': model,
+            'usage': usage_cost,
+            'issues': issues,
+            'output': llm_json,
+        })
+        if not issues:
+            accepted_model = model
+            return llm_json, accepted_model, attempts, usage_info, []
+        log.warning(f'+  Metadata quality check failed for model={model}: {", ".join(issues)}')
+        last_json = llm_json
+        last_usage = usage_info
+        last_issues = issues
+
+    accepted_model = attempts[-1]['model'] if attempts else preferred_model
+    return last_json, accepted_model, attempts, last_usage, last_issues
 
 
 def normalize_user_meta(meta: dict[str, Any], default_title: str) -> dict[str, Any]:
@@ -600,9 +779,19 @@ def handle_args():
         help=f'OpenAI model to use [default: {L_DEFAULT_MODEL}]'
     )
     parser.add_argument(
+        '--publish-date',
+        help='Publish date for scheduled posts (MM-DD-YYYY, scheduled at 8:44am Eastern)'
+    )
+    parser.add_argument(
         '--minimize-cost',
         action='store_true',
         help='Auto-select the lowest estimated cost model for the operation (overrides --llm-model).'
+    )
+    parser.add_argument(
+        '--quality-profile',
+        choices=['strict', 'balanced', 'loose'],
+        default=QUALITY_PROFILE_DEFAULT,
+        help=f'Metadata quality profile for model escalation [default: {QUALITY_PROFILE_DEFAULT}]'
     )
     parser.add_argument(
         '--outdir',
@@ -666,8 +855,12 @@ def handle_args():
         log.info('+  Preview enabled (payload printed)')
     if args.force:
         log.info('+  Force enabled (skip update prompts)')
+    log.info(f'+  Requested LLM model: {args.llm_model}')
+    if args.publish_date:
+        log.info(f'+  Publish date: {args.publish_date} (8:44am Eastern)')
     if args.minimize_cost:
         log.info('+  Minimize cost enabled (auto-select model)')
+    log.info(f'+  Quality profile: {args.quality_profile}')
     log.info(f'+  Output directory: {args.outdir}')
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
 
@@ -695,6 +888,19 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
     if not md_list and not args.suggest:
         log.error('No markdown inputs found. Provide --content-md.')
         return 2, {}
+    publish_date = None
+    if args.publish_date:
+        try:
+            publish_date = wpu.parse_publish_date(args.publish_date)
+        except ValueError as exc:
+            log.error(str(exc))
+            return 2, {}
+        if args.suggest:
+            log.info('Publish date provided in suggest mode; ignoring.')
+            publish_date = None
+        if publish_date and len(md_list) > 1:
+            log.error('Using --publish-date with multiple markdown inputs is not supported.')
+            return 2, {}
 
     headers = {
         'User-Agent': 'wp-agent/1.0'
@@ -722,7 +928,8 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
         'prompt_tokens': 0,
         'completion_tokens': 0,
         'estimated_input_tokens': 0,
-        'estimated_input_cost': 0.0
+        'estimated_input_cost': 0.0,
+        'temperature_fallback_calls': 0,
     }
 
     if args.meta_json and len(md_list) > 1:
@@ -800,14 +1007,7 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
             usage_cost = _usage_cost(model_for_call, usage_info, est_tokens, est_cost)
             if usage_cost.get('total_cost'):
                 total_cost += usage_cost.get('total_cost', 0) or 0
-            if usage_cost.get('prompt_tokens') is not None:
-                usage_totals['prompt_tokens'] += usage_cost.get('prompt_tokens') or 0
-            if usage_cost.get('completion_tokens') is not None:
-                usage_totals['completion_tokens'] += usage_cost.get('completion_tokens') or 0
-            if usage_cost.get('estimated_input_tokens') is not None:
-                usage_totals['estimated_input_tokens'] += usage_cost.get('estimated_input_tokens') or 0
-            if usage_cost.get('estimated_input_cost') is not None:
-                usage_totals['estimated_input_cost'] += usage_cost.get('estimated_input_cost') or 0.0
+            _accumulate_usage_totals(usage_totals, usage_cost)
             suggest_output = {
                 'model': model_for_call,
                 'usage': usage_cost,
@@ -835,14 +1035,7 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
             usage_cost = _usage_cost(args.llm_model, usage_info, est_tokens, est_cost)
             if usage_cost.get('total_cost'):
                 total_cost += usage_cost.get('total_cost', 0) or 0
-            if usage_cost.get('prompt_tokens') is not None:
-                usage_totals['prompt_tokens'] += usage_cost.get('prompt_tokens') or 0
-            if usage_cost.get('completion_tokens') is not None:
-                usage_totals['completion_tokens'] += usage_cost.get('completion_tokens') or 0
-            if usage_cost.get('estimated_input_tokens') is not None:
-                usage_totals['estimated_input_tokens'] += usage_cost.get('estimated_input_tokens') or 0
-            if usage_cost.get('estimated_input_cost') is not None:
-                usage_totals['estimated_input_cost'] += usage_cost.get('estimated_input_cost') or 0.0
+            _accumulate_usage_totals(usage_totals, usage_cost)
             suggest_output = {
                 'model': args.llm_model,
                 'usage': usage_cost,
@@ -875,24 +1068,42 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
             log.info(f'Wrote LLM input => {llm_input_path}')
 
             model_for_call = args.llm_model
+            llm_json: dict[str, Any] = {}
+            usage_cost: dict[str, Any] = {}
             if args.minimize_cost:
-                model_for_call, choice = _select_min_cost_model(
+                ranked = _rank_models_by_est_cost(prompt_text, llm_payload, 'metadata', args.llm_model)
+                if ranked:
+                    log.info(
+                        '+  Minimize cost: operation=metadata, candidates='
+                        + ', '.join(f'{c["model"]}(${c["total_cost"]:.6f})' for c in ranked)
+                    )
+                llm_json, model_for_call, attempts, _, final_issues = _call_llm_min_cost_with_quality(
                     prompt_text,
                     llm_payload,
-                    'metadata',
-                    args.llm_model
+                    args.llm_model,
+                    title_hint,
+                    args.quality_profile
                 )
-                if choice:
-                    log.info(
-                        f'+  Minimize cost: operation=metadata, model={model_for_call}, '
-                        f'input_tokens={choice["input_tokens"]}, output_tokens={choice["output_tokens"]}, '
-                        f'est_total_cost=${choice["total_cost"]:.6f}'
+                for attempt in attempts:
+                    attempt_usage = attempt.get('usage') or {}
+                    total_cost += attempt_usage.get('total_cost', 0) or 0
+                    _accumulate_usage_totals(usage_totals, attempt_usage)
+                usage_cost = attempts[-1].get('usage') if attempts else {}
+                if final_issues:
+                    log.warning(
+                        f'+  Proceeding with model={model_for_call} after exhausting candidates; '
+                        f'remaining issues: {", ".join(final_issues)}'
                     )
-            est_tokens, est_cost = estimate_tokens_and_cost(model_for_call, prompt_text, llm_payload)
-            llm_output_path = out_dir / 'llm_output.json'
-            llm_json, usage_info = _call_llm(prompt_text, llm_payload, model_for_call, None)
-            usage_cost = _usage_cost(model_for_call, usage_info, est_tokens, est_cost)
+                else:
+                    log.info(f'+  Selected model for metadata: {model_for_call}')
+            else:
+                est_tokens, est_cost = estimate_tokens_and_cost(model_for_call, prompt_text, llm_payload)
+                llm_json, usage_info = _call_llm(prompt_text, llm_payload, model_for_call, None)
+                usage_cost = _usage_cost(model_for_call, usage_info, est_tokens, est_cost)
+                total_cost += usage_cost.get('total_cost', 0) or 0
+                _accumulate_usage_totals(usage_totals, usage_cost)
 
+            llm_output_path = out_dir / 'llm_output.json'
             llm_output = {
                 'model': model_for_call,
                 'output': llm_json,
@@ -901,22 +1112,13 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
             llm_output_path.write_text(json.dumps(llm_output, ensure_ascii=False, indent=2), encoding='utf-8')
             log.info(f'Wrote LLM output => {llm_output_path}')
 
-            total_cost += usage_cost.get('total_cost', 0) or 0
-            if usage_cost.get('prompt_tokens') is not None:
-                usage_totals['prompt_tokens'] += usage_cost.get('prompt_tokens') or 0
-            if usage_cost.get('completion_tokens') is not None:
-                usage_totals['completion_tokens'] += usage_cost.get('completion_tokens') or 0
-            if usage_cost.get('estimated_input_tokens') is not None:
-                usage_totals['estimated_input_tokens'] += usage_cost.get('estimated_input_tokens') or 0
-            if usage_cost.get('estimated_input_cost') is not None:
-                usage_totals['estimated_input_cost'] += usage_cost.get('estimated_input_cost') or 0.0
-
             meta = normalize_meta(llm_json, title_hint)
             meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
             log.info(f'Wrote meta => {meta_path}')
         else:
-            log.warning('LLM disabled; writing stub meta and skipping publish.')
-            log.info('Fill in meta.json (title, excerpt, categories, tags) and rerun with --invoke-llm or --schedule.')
+            log.warning('LLM disabled; writing stub meta.')
+            if not args.dry_run and args.schedule:
+                log.info('Dry-run is required without --invoke-llm. Use --meta-json to schedule without LLM.')
             meta = {
                 'title': title_hint,
                 'excerpt': '',
@@ -925,7 +1127,8 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
             }
             meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
             log.info(f'Wrote meta => {meta_path}')
-            continue
+            if not args.dry_run and args.schedule:
+                continue
 
         if not args.schedule:
             log.info('Scheduling disabled; skipping publish step.')
@@ -934,6 +1137,7 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
         content_for_publish = wpu.strip_leading_h1(markdown_text)
         base_dir = item['base_dir']
         if args.dry_run:
+            log.info('*** this is a dry-run ***')
             payload = wpu.schedule_post_wp_api(
                 args.url,
                 headers,
@@ -942,8 +1146,24 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
                 dry_run=True,
                 preview=args.preview,
                 tz_name=wpu.DEFAULT_TIMEZONE,
-                force=args.force
+                force=args.force,
+                publish_date=publish_date
             )
+            shifted_posts = payload.get('shifted_posts') or []
+            if publish_date:
+                shifted_posts = list(shifted_posts)
+                shifted_posts.append({
+                    'operation': 'shift-scheduled',
+                    'id': '',
+                    'title': meta.get('title') or meta.get('post_title') or '',
+                    'from': '(new)',
+                    'to': payload.get('scheduled_for') or ''
+                })
+            if shifted_posts:
+                print(wpu.render_ascii_table(shifted_posts))
+                shift_path = out_dir / 'shift_report.json'
+                shift_path.write_text(json.dumps(shifted_posts, ensure_ascii=False, indent=2), encoding='utf-8')
+                log.info(f'Wrote shift report => {shift_path}')
             if payload.get('action') == 'skipped':
                 log.info('Update skipped.')
                 continue
@@ -965,13 +1185,19 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
                 dry_run=False,
                 preview=args.preview,
                 tz_name=wpu.DEFAULT_TIMEZONE,
-                force=args.force
+                force=args.force,
+                publish_date=publish_date
             )
             if result.get('action') == 'skipped':
                 log.info('Update skipped.')
                 continue
             if args.preview:
                 print(json.dumps(result.get('payload', {}), indent=2))
+                shifted_posts = result.get('shifted_posts') or []
+                if shifted_posts:
+                    shift_path = out_dir / 'shift_report.json'
+                    shift_path.write_text(json.dumps(shifted_posts, ensure_ascii=False, indent=2), encoding='utf-8')
+                    log.info(f'Wrote shift report => {shift_path}')
                 post = result.get('post', {})
             else:
                 post = result
@@ -986,6 +1212,7 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
         'completion_tokens': usage_totals['completion_tokens'],
         'estimated_input_tokens': usage_totals['estimated_input_tokens'],
         'estimated_input_cost': usage_totals['estimated_input_cost'],
+        'temperature_fallback_calls': usage_totals['temperature_fallback_calls'],
         'total_cost': total_cost
     }
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
@@ -993,6 +1220,7 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
     if usage_totals['estimated_input_tokens']:
         log.info(f'+  Estimated input tokens: {usage_totals["estimated_input_tokens"]}')
         log.info(f'+  Estimated input cost: ${usage_totals["estimated_input_cost"]:.4f}')
+    log.info(f'+  Temperature fallback retries: {usage["temperature_fallback_calls"]}')
     log.info(f'+  Estimated LLM cost: ${usage["total_cost"]:.4f}')
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
     return 0, usage
@@ -1000,6 +1228,8 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
 
 def main():
     args = handle_args()
+    if args.dry_run:
+        atexit.register(lambda: log.info(f'NO changes were made to the WP site: {args.url}'))
     rc_code, _usage = run_agentic_workflow(args)
     sys.exit(rc_code)
 

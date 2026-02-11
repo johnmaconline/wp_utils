@@ -20,6 +20,8 @@ import os
 import json
 import mimetypes
 from datetime import date
+from typing import Any
+import atexit
 from docx import Document
 from docx.shared import Pt
 from docx.oxml import OxmlElement
@@ -391,6 +393,7 @@ def _select_columns(rows):
             'get-taxonomies': ['name', 'slug', 'description'],
             'get-settings': ['key', 'value'],
             'get-themes': ['stylesheet', 'name', 'version', 'status'],
+            'shift-scheduled': ['id', 'title', 'from', 'to'],
         }
         if op in op_map:
             return op_map[op]
@@ -1211,7 +1214,112 @@ def fetch_latest_scheduled_date(url, headers, tz_name):
     return dt
 
 
-def build_schedule_payload(url, headers, content_md, meta, tz_name=DEFAULT_TIMEZONE):
+def parse_publish_date(date_str: str) -> date:
+    if not date_str:
+        raise ValueError('publish-date is required')
+    try:
+        return datetime.strptime(date_str, '%m-%d-%Y').date()
+    except ValueError as exc:
+        raise ValueError('publish-date must be MM-DD-YYYY') from exc
+
+
+def _coerce_publish_date(publish_date: Any) -> date | None:
+    if not publish_date:
+        return None
+    if isinstance(publish_date, datetime):
+        return publish_date.date()
+    if isinstance(publish_date, date):
+        return publish_date
+    if isinstance(publish_date, str):
+        return parse_publish_date(publish_date)
+    raise ValueError('publish-date must be MM-DD-YYYY')
+
+
+def fetch_scheduled_posts(url, headers, tz_name, start_date: date | None = None, exclude_ids: set[int] | None = None):
+    posts_url = build_wp_api_posts_url(url)
+    params = {
+        'status': 'future',
+        'per_page': WP_API_MAX_PER_PAGE,
+        'orderby': 'date',
+        'order': 'asc',
+        'page': 1,
+    }
+    posts: list[dict[str, Any]] = []
+    while True:
+        response = requests.get(posts_url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise ValueError(f"Failed to fetch scheduled posts: {response.status_code} {response.text}")
+        data = response.json()
+        if not isinstance(data, list) or not data:
+            break
+        for post in data:
+            post_id = post.get('id')
+            if exclude_ids and post_id in exclude_ids:
+                continue
+            date_str = post.get('date')
+            if not date_str:
+                continue
+            dt = datetime.fromisoformat(date_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo(tz_name))
+            if start_date and dt.date() < start_date:
+                continue
+            title_raw = ''
+            title_obj = post.get('title') or {}
+            if isinstance(title_obj, dict):
+                title_raw = title_obj.get('rendered', '') or ''
+            title_text = BeautifulSoup(title_raw, 'html.parser').get_text().strip() if title_raw else ''
+            posts.append({'id': post_id, 'date': dt, 'title': title_text})
+        total_pages = int(response.headers.get('X-WP-TotalPages', 1))
+        if params['page'] >= total_pages:
+            break
+        params['page'] += 1
+    return posts
+
+
+def shift_scheduled_posts(url, headers, start_date: date, tz_name=DEFAULT_TIMEZONE, dry_run=False, exclude_ids: set[int] | None = None):
+    if not start_date:
+        return []
+    posts = fetch_scheduled_posts(url, headers, tz_name, start_date=start_date, exclude_ids=exclude_ids)
+    if not posts:
+        return []
+    posts_url = build_wp_api_posts_url(url)
+    shifted = []
+    posts.sort(key=lambda p: p.get('date'), reverse=True)
+    for post in posts:
+        post_id = post.get('id')
+        if not post_id:
+            continue
+        old_dt = post['date']
+        new_dt = old_dt + timedelta(days=1)
+        shifted.append({'id': post_id, 'title': post.get('title', ''), 'from': old_dt, 'to': new_dt})
+        if dry_run:
+            continue
+        update_url = posts_url.rstrip('/') + f'/{post_id}'
+        payload = {
+            'date': new_dt.strftime('%Y-%m-%dT%H:%M:%S'),
+            'status': 'future'
+        }
+        response = requests.post(update_url, headers=headers, json=payload)
+        if response.status_code >= 400:
+            raise ValueError(f"Failed to shift post {post_id}: {response.status_code} {response.text}")
+    return shifted
+
+
+def format_shift_report(shifted: list[dict[str, Any]]):
+    report = []
+    for item in shifted or []:
+        report.append({
+            'operation': 'shift-scheduled',
+            'id': item.get('id'),
+            'title': item.get('title', ''),
+            'from': item.get('from').strftime('%Y-%m-%dT%H:%M:%S') if item.get('from') else '',
+            'to': item.get('to').strftime('%Y-%m-%dT%H:%M:%S') if item.get('to') else '',
+        })
+    return report
+
+
+def build_schedule_payload(url, headers, content_md, meta, tz_name=DEFAULT_TIMEZONE, publish_date: Any | None = None):
     title = meta.get('title') or meta.get('post_title')
     if not title:
         raise ValueError('Metadata JSON must include title.')
@@ -1249,11 +1357,15 @@ def build_schedule_payload(url, headers, content_md, meta, tz_name=DEFAULT_TIMEZ
     else:
         tag_ids = []
 
-    latest_dt = fetch_latest_scheduled_date(url, headers, tz_name)
-    now_local = datetime.now(ZoneInfo(tz_name))
-    base_date = latest_dt.date() if latest_dt else now_local.date()
-    schedule_date = base_date + timedelta(days=1)
-    schedule_dt = datetime.combine(schedule_date, time(8, 44), tzinfo=ZoneInfo(tz_name))
+    publish_day = _coerce_publish_date(publish_date)
+    if publish_day:
+        schedule_dt = datetime.combine(publish_day, time(8, 44), tzinfo=ZoneInfo(tz_name))
+    else:
+        latest_dt = fetch_latest_scheduled_date(url, headers, tz_name)
+        now_local = datetime.now(ZoneInfo(tz_name))
+        base_date = latest_dt.date() if latest_dt else now_local.date()
+        schedule_date = base_date + timedelta(days=1)
+        schedule_dt = datetime.combine(schedule_date, time(8, 44), tzinfo=ZoneInfo(tz_name))
 
     payload = {
         'title': title,
@@ -1336,8 +1448,8 @@ def _confirm_update(existing, slug, force=False):
     return resp.strip().lower() in ('y', 'yes')
 
 
-def schedule_post_wp_api(url, headers, content_md, meta, dry_run=False, preview=False, tz_name=DEFAULT_TIMEZONE, force=False):
-    payload, schedule_dt = build_schedule_payload(url, headers, content_md, meta, tz_name)
+def schedule_post_wp_api(url, headers, content_md, meta, dry_run=False, preview=False, tz_name=DEFAULT_TIMEZONE, force=False, publish_date: Any | None = None):
+    payload, schedule_dt = build_schedule_payload(url, headers, content_md, meta, tz_name, publish_date=publish_date)
     existing = find_post_by_slug(url, headers, payload.get('slug', ''))
     if existing:
         if not _confirm_update(existing, payload.get('slug', ''), force=force):
@@ -1351,14 +1463,22 @@ def schedule_post_wp_api(url, headers, content_md, meta, dry_run=False, preview=
             }
         if existing.get('status'):
             payload['status'] = existing.get('status')
-        if existing.get('date'):
+        if existing.get('date') and not publish_date:
             payload['date'] = existing.get('date')
             schedule_dt = datetime.fromisoformat(existing.get('date'))
+    exclude_ids = {existing.get('id')} if existing and existing.get('id') else None
+    shifted = []
+    if publish_date:
+        publish_day = _coerce_publish_date(publish_date)
+        shifted = shift_scheduled_posts(url, headers, publish_day, tz_name=tz_name, dry_run=dry_run, exclude_ids=exclude_ids)
+        if shifted:
+            log.info(f'+  Shifted {len(shifted)} scheduled post(s) by +1 day starting {publish_day.strftime("%m-%d-%Y")}')
     if dry_run:
         return {
             'scheduled_for': schedule_dt.isoformat(),
             'action': 'update' if existing else 'create',
-            'payload': payload
+            'payload': payload,
+            'shifted_posts': format_shift_report(shifted)
         }
     posts_url = build_wp_api_posts_url(url)
     if existing:
@@ -1375,7 +1495,8 @@ def schedule_post_wp_api(url, headers, content_md, meta, dry_run=False, preview=
             'post': post,
             'scheduled_for': schedule_dt.isoformat(),
             'action': 'update' if existing else 'create',
-            'payload': payload
+            'payload': payload,
+            'shifted_posts': format_shift_report(shifted)
         }
     return post
 
@@ -1718,6 +1839,9 @@ def handle_args():
         '--meta-json',
         help='Path to metadata JSON file for --schedule-post')
     parser.add_argument(
+        '--publish-date',
+        help='Publish date for --schedule-post (MM-DD-YYYY, scheduled at 8:44am Eastern)')
+    parser.add_argument(
         '--dry-run',
         action='store_true',
         help='Show planned changes without making updates (used with --schedule-post).')
@@ -1863,6 +1987,12 @@ def handle_args():
         if not args.wp_username or not args.wp_app_password:
             log.error('XXX Missing WP credentials for --schedule-post')
             sys.exit(1)
+        if args.publish_date:
+            try:
+                parse_publish_date(args.publish_date)
+            except ValueError as exc:
+                log.error(f'XXX {exc}')
+                sys.exit(1)
     if (args.get_plugins or args.list_posts or args.get_pages or args.get_categories or args.get_tags or
             args.get_users or args.get_user_me or args.get_media or args.get_comments or args.get_types or
             args.get_statuses or args.get_taxonomies or args.get_settings or args.get_themes) and not args.url:
@@ -1892,6 +2022,8 @@ def handle_args():
         log.info(f'+  Content markdown: {args.content_md}')
         log.info(f'+  Metadata JSON: {args.meta_json}')
         log.info(f'+  Timezone: {DEFAULT_TIMEZONE}')
+        if args.publish_date:
+            log.info(f'+  Publish date: {args.publish_date} (8:44am Eastern)')
         if args.dry_run:
             log.info('+  Dry run enabled (no post will be created)')
         if args.preview:
@@ -2016,6 +2148,8 @@ def handle_args():
 # ****************************************************************************************
 def main():
     args = handle_args()
+    if args.dry_run:
+        atexit.register(lambda: log.info(f'NO changes were made to the WP site: {args.url}'))
     # Build initial list of directories to check for existing posts
     indir_list = args.indir or []
     results_outfile = args.outfile or f"out.{args.outfile_format}"
@@ -2066,6 +2200,7 @@ def main():
             base_dir = os.path.dirname(args.content_md) if args.content_md != '-' else os.getcwd()
             uploads = []
             if args.dry_run:
+                log.info('*** this is a dry-run ***')
                 local_images = find_local_markdown_images(content_md, base_dir)
                 missing = [path for path in local_images if not os.path.exists(path)]
                 if missing:
@@ -2080,8 +2215,22 @@ def main():
                     dry_run=True,
                     preview=args.preview,
                     tz_name=DEFAULT_TIMEZONE,
-                    force=args.force
+                    force=args.force,
+                    publish_date=args.publish_date
                 )
+                shifted_posts = result.get('shifted_posts') or []
+                if args.publish_date:
+                    shifted_posts = list(shifted_posts)
+                    shifted_posts.append({
+                        'operation': 'shift-scheduled',
+                        'id': '',
+                        'title': meta.get('title') or meta.get('post_title') or '',
+                        'from': '(new)',
+                        'to': result.get('scheduled_for') or ''
+                    })
+                if shifted_posts:
+                    log.info('+  Shift report (dry run)')
+                    print(render_ascii_table(shifted_posts))
                 action = result.get('action')
                 if action == 'skipped':
                     log.info('Update skipped.')
@@ -2107,8 +2256,14 @@ def main():
                     dry_run=False,
                     preview=args.preview,
                     tz_name=DEFAULT_TIMEZONE,
-                    force=args.force
+                    force=args.force,
+                    publish_date=args.publish_date
                 )
+                if args.preview:
+                    shifted_posts = result.get('shifted_posts') or []
+                    if shifted_posts:
+                        log.info('+  Shift report')
+                        print(render_ascii_table(shifted_posts))
                 action = result.get('action')
                 if action == 'skipped':
                     log.info('Update skipped.')
