@@ -3,6 +3,7 @@ beautifulsoup4
 python-docx
 markdown
 openai
+tiktoken
 tweepy
 pytest
 coverage

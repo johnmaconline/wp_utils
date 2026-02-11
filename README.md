@@ -29,6 +29,7 @@ Results from `--get-plugins`, `--get-posts`, or any other `--get-*` operation ar
 - `--schedule-post` Schedule a post using markdown content + metadata JSON
 - `--content-md` Markdown file path for `--schedule-post` (use `-` for stdin)
 - `--meta-json` Metadata JSON file path for `--schedule-post`
+- `--publish-date` Publish date (MM-DD-YYYY, scheduled at 8:44am Eastern; shifts existing scheduled posts by +1 day starting that date)
 - `--dry-run` Show planned changes without creating a post (used with `--schedule-post`)
 - `--preview` Print the final scheduled post payload (used with `--schedule-post`)
 - `--export-site` Export site data: all, all-no-media, or comma-separated list (posts,pages,media,comments,users,categories,tags,taxonomies,types,statuses,settings,menus,plugins)
@@ -109,11 +110,11 @@ Examples:
     --preview
   ```
   Notes:
-  - `The250` is always added automatically and must exist on the site.
-  - Other categories are resolved by name; missing categories log a warning and are skipped.
+  - `The250` is always added automatically; missing categories are created automatically.
   - Tags are optional and resolved by name; missing tags are created automatically.
   - If `slug` is omitted, it is auto-generated from the title (lowercase, words joined by `-`).
   - A leading `# H1` at the top of the markdown is stripped to avoid duplicate titles.
+  - Yoast fields supported: `focus_keyphrase`, `meta_description`.
   Metadata JSON format:
   ```json
   {
@@ -121,13 +122,104 @@ Examples:
     "categories": ["AI"],
     "tags": ["workflow", "automation"],
     "excerpt": "Short summary shown in listings",
-    "slug": "my-post-title"
+    "slug": "my-post-title",
+    "focus_keyphrase": "ai teaching intuition",
+    "meta_description": "AI can teach information, but intuition still requires years of repetition."
   }
   ```
 - Export everything but media binaries (metadata only):
   ```bash
   python3 wp_utilities.py --export-site all-no-media --url https://johnmaconline.com
   ```
+
+### `wp_agent.py`
+Agentic workflow (Google ADK style) for WordPress publishing. Uses OpenAI to generate metadata JSON
+and then schedules the post using the same wp_utilities toolset.
+Prompt template: `wp_meta_prompt.md`
+Suggestion prompt: `wp_suggest_prompt.md`
+
+Prereqs:
+```bash
+export OPENAI_API_KEY="your-openai-key"
+export GOOGLE_ADK_API_KEY="your-google-key"  # stubbed client, used for parity with jobber.ai
+export WP_USERNAME="your_wp_user"
+export WP_APP_PASSWORD="xxxx xxxx xxxx xxxx xxxx"
+```
+Or set these in a `.env` file (required). Example:
+```bash
+OPENAI_API_KEY=your-openai-key
+GOOGLE_ADK_API_KEY=your-google-key
+WP_USERNAME=your_wp_user
+WP_APP_PASSWORD=xxxx xxxx xxxx xxxx xxxx
+```
+
+Args:
+- `--content-md` Markdown file(s) to publish (accepts globs and lists)
+- `--invoke-llm` Call OpenAI to generate metadata JSON
+- `--suggest` Suggest 10 topic ideas for the next article (LLM). Uses `--url` as input.
+- `--meta-json` Use existing metadata JSON (skip LLM generation)
+- `--schedule/--no-schedule` Schedule posts after metadata (default: true)
+- `--dry-run` No publish
+- `--preview` Print the final WordPress payload
+- `--force` Skip confirmation prompts when updating existing posts
+- `--llm-model` OpenAI model (default from `WP_AGENT_LLM_MODEL` or `gpt-5.1`)
+- `--publish-date` Publish date (MM-DD-YYYY, scheduled at 8:44am Eastern; shifts existing scheduled posts by +1 day starting that date)
+- `--minimize-cost` Auto-select the lowest estimated cost model for the operation (overrides `--llm-model`)
+- `--quality-profile` Metadata quality profile for escalation: `strict`, `balanced`, `loose` (default: `balanced`)
+- `--outdir` Output dir for artifacts (default: `./out`)
+- `--url` Target site (default: `johnmaconline.com`)
+- `--outfile` Output file base name for suggestions (defaults to out.<format> if omitted)
+- `--outfile-format` Output format for suggestions file: `json` or `csv` (default: `json`)
+
+Pricing estimates (used by `wp_agent.py` and `categorize_wp_posts.py` for cost logging, USD per 1M tokens, input/output; OpenAI API pricing verified on 2026-02-10):
+- `gpt-5-nano`: $0.05 / $0.40
+- `gpt-5-mini`: $0.25 / $2.00
+- `gpt-5`: $1.25 / $10.00
+- `gpt-5-chat-latest`: $1.25 / $10.00
+- `gpt-5.2`: $1.75 / $14.00
+- `gpt-5.2-chat-latest`: $1.75 / $14.00
+- `gpt-5.1`: $1.25 / $10.00
+- `gpt-5.1-chat-latest`: $1.25 / $10.00
+- `gpt-4o`: $2.50 / $10.00
+- `gpt-4o-mini`: $0.15 / $0.60
+
+Notes:
+- The LLM can suggest categories and tags. Categories are capped at 4 and limited to AI, Leadership, Technology, Human.
+- `The250` is always added automatically and must exist on the site.
+- Tags are capped at 8 and missing tags are created automatically.
+- Existing tags are provided to the LLM (capped at 50 by usage count).
+- If `--invoke-llm` is omitted, a stub `meta.json` is written and no publish occurs.
+- Yoast fields supported via LLM output: `focus_keyphrase`, `meta_description` (<=160 chars).
+- `--minimize-cost` uses a quality-gated model cascade for metadata: tries lowest-cost models first and escalates only if required metadata quality checks fail.
+- `--quality-profile` controls those checks:
+  - `strict`: excerpt required, >=4 tags, keyphrase + meta description required, keyphrase must appear in meta description, meta description length 120-160.
+  - `balanced`: excerpt required, >=3 tags, keyphrase + meta description required, keyphrase must appear in meta description, meta description <=160.
+  - `loose`: excerpt optional, >=1 tag, meta description required, keyphrase optional, meta description <=160.
+- LLM calls use a model capability map for temperature settings and automatically retry once with API default temperature if a model rejects the configured value.
+- `--publish-date` with `--dry-run` writes `shift_report.json` to the output directory.
+
+Example:
+```bash
+python3 wp_agent.py \
+  --content-md "new_posts/*.md" \
+  --invoke-llm \
+  --preview \
+  --dry-run
+```
+
+To publish:
+```bash
+python3 wp_agent.py \
+  --content-md "new_posts/*.md" \
+  --invoke-llm
+```
+
+Use an existing meta JSON (skip LLM):
+```bash
+python3 wp_agent.py \
+  --content-md "new_posts/post.md" \
+  --meta-json "out/post_slug/meta.json"
+```
 - Incremental export of posts + media:
   ```bash
   python3 wp_utilities.py --export-site posts,media --incremental --url https://johnmaconline.com
@@ -136,12 +228,16 @@ Examples:
 
 ### `categorize_wp_posts.py`
 Uses OpenAI to decide if posts should be tagged with a target category and additively updates categories.
+Also supports single-call recategorization for `The250` posts into the 4 supported categories (`AI`, `Leadership`, `Technology`, `Human`).
 
 Args:
 - `--url` Site URL or WP API URL (required)
 - `--target-category` Category to add when matched (default: `AI`)
 - `--only-category` Only process posts already in this category (by name)
+- `--recategorize-the250` One-call-per-post recategorization mode for posts in `The250`
+- `--start-date` Start date (MM-DD-YYYY); processing runs backward in time from this date
 - `--model` OpenAI model (default: `gpt-4.1`)
+- `--minimize-cost` Auto-select lowest estimated token cost model (enabled automatically for `--recategorize-the250`)
 - `--limit` Max number of posts
 - `--max-chars` Max chars sent to model (default: `8000`)
 - `--min-confidence` Minimum confidence to add category (default: `0.8`)
@@ -162,6 +258,25 @@ Examples:
   ```bash
   export OPENAI_API_KEY="..."
   python3 categorize_wp_posts.py --url https://johnmaconline.com --target-category AI --only-category The250 --dry-run
+  ```
+- Dry-run recategorization for all `The250` posts from Feb 9, 2026 backward (single LLM call per post):
+  ```bash
+  export OPENAI_API_KEY="..."
+  python3 categorize_wp_posts.py \
+    --url https://johnmaconline.com \
+    --recategorize-the250 \
+    --start-date 02-09-2026 \
+    --dry-run
+  ```
+- Apply recategorization updates:
+  ```bash
+  export OPENAI_API_KEY="..."
+  export WP_USERNAME="your_wp_user"
+  export WP_APP_PASSWORD="xxxx xxxx xxxx xxxx xxxx"
+  python3 categorize_wp_posts.py \
+    --url https://johnmaconline.com \
+    --recategorize-the250 \
+    --start-date 02-09-2026
   ```
 - Apply updates:
   ```bash

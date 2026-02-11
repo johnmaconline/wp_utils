@@ -263,6 +263,7 @@ def handle_args():
     log.info(f'+  {os.path.basename(sys.argv[0])}')
     log.info(f'+  Python Version: {sys.version.split()[0]}')
     log.info(f'+  Today is: {datetime.today().date()}')
+    log.info(f'+  OpenAI model: {args.model}')
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
 
     return args
@@ -303,4 +304,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

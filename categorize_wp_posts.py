@@ -16,7 +16,7 @@ import logging
 import os
 import sys
 import time
-from datetime import date
+from datetime import date, datetime
 from urllib.parse import urlparse
 
 import requests
@@ -28,6 +28,24 @@ from openai import OpenAI
 # ****************************************************************************************
 
 WP_API_MAX_PER_PAGE = 100
+ALLOWED_CATEGORIES = ['AI', 'Leadership', 'Technology', 'Human']
+PRICE_TABLE_DEFAULT = {
+    'gpt-5-nano': {'in_per_m': 0.05, 'out_per_m': 0.40},
+    'gpt-5-mini': {'in_per_m': 0.25, 'out_per_m': 2.00},
+    'gpt-5': {'in_per_m': 1.25, 'out_per_m': 10.00},
+    'gpt-5-chat-latest': {'in_per_m': 1.25, 'out_per_m': 10.00},
+    'gpt-5.2': {'in_per_m': 1.75, 'out_per_m': 14.00},
+    'gpt-5.2-chat-latest': {'in_per_m': 1.75, 'out_per_m': 14.00},
+    'gpt-5.1': {'in_per_m': 1.25, 'out_per_m': 10.00},
+    'gpt-5.1-chat-latest': {'in_per_m': 1.25, 'out_per_m': 10.00},
+    'gpt-4o-mini': {'in_per_m': 0.15, 'out_per_m': 0.60},
+    'gpt-4o': {'in_per_m': 2.50, 'out_per_m': 10.00},
+}
+SAMPLE_MULTI_CATEGORY_OUTPUT = {
+    'categories': ['AI', 'Leadership'],
+    'confidence': 0.9,
+    'reason': 'Primary themes match AI and leadership.'
+}
 DEFAULT_USER_AGENT = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
     'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -116,7 +134,80 @@ def safe_json_loads(text):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        if not text:
+            return None
+        start = text.find('{')
+        end = text.rfind('}')
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                return None
         return None
+
+
+def parse_start_date(date_str):
+    try:
+        return datetime.strptime((date_str or '').strip(), '%m-%d-%Y')
+    except ValueError as exc:
+        raise ConfigError('start-date must be MM-DD-YYYY') from exc
+
+
+def estimate_tokens(text, model):
+    try:
+        import tiktoken  # type: ignore
+    except Exception:
+        tiktoken = None
+    if not tiktoken:
+        return max(1, int(len(text or '') / 4))
+    try:
+        enc = tiktoken.encoding_for_model(model)
+    except Exception:
+        enc = tiktoken.get_encoding('cl100k_base')
+    return len(enc.encode(text or ''))
+
+
+def select_min_cost_model(system_prompt, user_text, preferred_model):
+    candidates = []
+    sample_out_text = json.dumps(SAMPLE_MULTI_CATEGORY_OUTPUT, ensure_ascii=False)
+    for model, price in PRICE_TABLE_DEFAULT.items():
+        in_rate = price.get('in_per_m', 0)
+        out_rate = price.get('out_per_m', 0)
+        in_tokens = estimate_tokens(system_prompt, model) + estimate_tokens(user_text, model)
+        out_tokens = estimate_tokens(sample_out_text, model)
+        in_cost = (in_tokens / 1_000_000) * in_rate if in_rate else 0
+        out_cost = (out_tokens / 1_000_000) * out_rate if out_rate else 0
+        total = in_cost + out_cost
+        candidates.append((total, model, in_tokens, out_tokens))
+    if not candidates:
+        return preferred_model, {}
+    candidates.sort(key=lambda item: (item[0], 0 if item[1] == preferred_model else 1, item[1]))
+    total, model, in_tokens, out_tokens = candidates[0]
+    return model, {
+        'estimated_total_cost': total,
+        'estimated_input_tokens': in_tokens,
+        'estimated_output_tokens': out_tokens,
+    }
+
+
+def normalize_allowed_categories(values):
+    if isinstance(values, str):
+        values = [values]
+    values = values or []
+    allowed_lookup = {c.lower(): c for c in ALLOWED_CATEGORIES}
+    normalized = []
+    seen = set()
+    for value in values:
+        cat = str(value).strip()
+        canon = allowed_lookup.get(cat.lower())
+        if not canon:
+            continue
+        key = canon.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(canon)
+    return normalized[:4]
 
 # ****************************************************************************************
 # WordPress API
@@ -155,7 +246,7 @@ def fetch_all_categories(categories_url, session, headers):
     return categories, id_to_name
 
 
-def fetch_posts(posts_url, session, headers, limit=None, category_id=None):
+def fetch_posts(posts_url, session, headers, limit=None, category_id=None, before_iso=None):
     posts = []
     page = 1
     while True:
@@ -169,6 +260,8 @@ def fetch_posts(posts_url, session, headers, limit=None, category_id=None):
         }
         if category_id:
             params['categories'] = category_id
+        if before_iso:
+            params['before'] = before_iso
         response = fetch_wp_page(posts_url, session, headers, params)
         data = response.json()
         posts.extend(data)
@@ -213,6 +306,10 @@ def classify_post(client, model, target_category, title, excerpt, content, max_c
         f"Excerpt: {trimmed_excerpt}\n"
         f"Content: {trimmed_content}\n"
     )
+    return _classify_post_single_prompt(client, model, prompt, user_text)
+
+
+def _classify_post_single_prompt(client, model, prompt, user_text):
 
     response = client.responses.create(
         model=model,
@@ -236,6 +333,72 @@ def classify_post(client, model, target_category, title, excerpt, content, max_c
         raise APIError(f"Invalid JSON from model: {output_text}")
     return result
 
+
+def build_single_category_prompt_payload(target_category, title, excerpt, content, max_chars):
+    content_text = html_to_text(content)
+    excerpt_text = html_to_text(excerpt)
+    trimmed_content = truncate_text(content_text, max_chars)
+    trimmed_excerpt = truncate_text(excerpt_text, max_chars)
+    prompt = (
+        "You are a careful content classifier. "
+        "Decide whether the blog post should be tagged with the category named below. "
+        "Return a JSON object with: add (true/false), confidence (0-1), reason (short). "
+        "Only answer with JSON."
+    )
+    user_text = (
+        f"Category: {target_category}\n"
+        f"Title: {title}\n"
+        f"Excerpt: {trimmed_excerpt}\n"
+        f"Content: {trimmed_content}\n"
+    )
+    return prompt, user_text
+
+
+def build_multi_category_prompt_payload(title, excerpt, content, max_chars):
+    content_text = html_to_text(content)
+    excerpt_text = html_to_text(excerpt)
+    trimmed_content = truncate_text(content_text, max_chars)
+    trimmed_excerpt = truncate_text(excerpt_text, max_chars)
+    prompt = (
+        "You are a careful content classifier for blog posts. "
+        "Choose the most appropriate categories from this allowed list only: "
+        "AI, Leadership, Technology, Human. "
+        "Return JSON only with keys: categories (array of strings, 0-4 from allowed list), "
+        "confidence (0-1), reason (short)."
+    )
+    user_text = (
+        f"Allowed categories: {', '.join(ALLOWED_CATEGORIES)}\n"
+        f"Title: {title}\n"
+        f"Excerpt: {trimmed_excerpt}\n"
+        f"Content: {trimmed_content}\n"
+    )
+    return prompt, user_text
+
+
+def classify_post_multi_category(client, model, title, excerpt, content, max_chars):
+    prompt, user_text = build_multi_category_prompt_payload(title, excerpt, content, max_chars)
+    response = client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "system",
+                "content": [{"type": "input_text", "text": prompt}]
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": user_text}]
+            }
+        ],
+        temperature=0,
+        max_output_tokens=256
+    )
+    output_text = (response.output_text or '').strip()
+    result = safe_json_loads(output_text)
+    if not result:
+        raise APIError(f"Invalid JSON from model: {output_text}")
+    result['categories'] = normalize_allowed_categories(result.get('categories') or [])
+    return result
+
 # ****************************************************************************************
 # CLI
 # ****************************************************************************************
@@ -256,9 +419,20 @@ def handle_args():
         '--only-category',
         help='Only process posts that already have this category (by name)')
     parser.add_argument(
+        '--recategorize-the250',
+        action='store_true',
+        help='Single-call recategorization mode: process posts in The250 and set the 4 supported categories.')
+    parser.add_argument(
+        '--start-date',
+        help='Start date for processing window (MM-DD-YYYY). Posts are processed backward from this date.')
+    parser.add_argument(
         '--model',
         default='gpt-4.1',
         help='OpenAI model to use [default: gpt-4.1]')
+    parser.add_argument(
+        '--minimize-cost',
+        action='store_true',
+        help='Auto-select the lowest estimated cost model from the local price table.')
     parser.add_argument(
         '--limit',
         type=int,
@@ -340,6 +514,8 @@ def handle_args():
 
 def main():
     args = handle_args()
+    if args.recategorize_the250 and not args.minimize_cost:
+        args.minimize_cost = True
 
     if not args.openai_api_key:
         raise ConfigError("Missing OPENAI_API_KEY (env var or --openai-api-key)")
@@ -347,21 +523,6 @@ def main():
     posts_url, categories_url = build_wp_endpoints(args.url)
     if not posts_url or not categories_url:
         raise ConfigError("Invalid URL. Please provide a site URL or WP API URL.")
-
-    log.info('++++++++++++++++++++++++++++++++++++++++++++++')
-    log.info(f'+  {os.path.basename(sys.argv[0])}')
-    log.info(f'+  Python Version: {sys.version.split()[0]}')
-    log.info(f'+  Today is: {date.today()}')
-    log.info(f'+  Target URL: {args.url}')
-    log.info(f'+  Posts endpoint: {posts_url}')
-    log.info(f'+  Target category: {args.target_category}')
-    if args.only_category:
-        log.info(f'+  Only process category: {args.only_category}')
-    log.info(f'+  Model: {args.model}')
-    log.info(f'+  Dry run: {args.dry_run}')
-    if args.limit:
-        log.info(f'+  Post limit: {args.limit}')
-    log.info('++++++++++++++++++++++++++++++++++++++++++++++')
 
     session = requests.Session()
     headers = {'User-Agent': DEFAULT_USER_AGENT}
@@ -372,23 +533,68 @@ def main():
     elif not args.dry_run:
         raise ConfigError("Missing WP credentials. Provide WP_USERNAME/WP_APP_PASSWORD or --wp-username/--wp-app-password.")
 
+    start_dt = parse_start_date(args.start_date) if args.start_date else None
+    before_iso = start_dt.strftime('%Y-%m-%dT23:59:59') if start_dt else None
+    effective_only_category = 'The250' if args.recategorize_the250 else args.only_category
+    selected_model = args.model
+
+    log.info('++++++++++++++++++++++++++++++++++++++++++++++')
+    log.info(f'+  {os.path.basename(sys.argv[0])}')
+    log.info(f'+  Python Version: {sys.version.split()[0]}')
+    log.info(f'+  Today is: {date.today()}')
+    log.info(f'+  Target URL: {args.url}')
+    log.info(f'+  Posts endpoint: {posts_url}')
+    log.info(f'+  Mode: {"recategorize-the250" if args.recategorize_the250 else "single-category"}')
+    if args.recategorize_the250:
+        log.info(f'+  Allowed categories: {", ".join(ALLOWED_CATEGORIES)}')
+    else:
+        log.info(f'+  Target category: {args.target_category}')
+    if effective_only_category:
+        log.info(f'+  Only process category: {effective_only_category}')
+    if start_dt:
+        log.info(f'+  Start date: {start_dt.strftime("%m-%d-%Y")} (processing backward in time)')
+    log.info(f'+  Model: {selected_model}')
+    if args.minimize_cost:
+        log.info('+  Minimize cost: enabled')
+    log.info(f'+  Dry run: {args.dry_run}')
+    if args.limit:
+        log.info(f'+  Post limit: {args.limit}')
+    log.info('++++++++++++++++++++++++++++++++++++++++++++++')
+
     client = OpenAI(api_key=args.openai_api_key)
 
     log.info('Fetching categories...')
     categories, categories_by_id = fetch_all_categories(categories_url, session, headers)
-    target_key = args.target_category.strip().lower()
-    if target_key not in categories:
-        raise ConfigError(f"Target category '{args.target_category}' not found in WordPress.")
-    target_category_id = categories[target_key]
+    target_category_id = None
+    allowed_category_ids = {}
+    if args.recategorize_the250:
+        missing = [cat for cat in ALLOWED_CATEGORIES if cat.lower() not in categories]
+        if missing:
+            raise ConfigError(f"Missing required categories in WordPress: {', '.join(missing)}")
+        for cat in ALLOWED_CATEGORIES:
+            allowed_category_ids[cat] = categories[cat.lower()]
+    else:
+        target_key = args.target_category.strip().lower()
+        if target_key not in categories:
+            raise ConfigError(f"Target category '{args.target_category}' not found in WordPress.")
+        target_category_id = categories[target_key]
+
     only_category_id = None
-    if args.only_category:
-        only_key = args.only_category.strip().lower()
+    if effective_only_category:
+        only_key = effective_only_category.strip().lower()
         if only_key not in categories:
-            raise ConfigError(f"Only-category '{args.only_category}' not found in WordPress.")
+            raise ConfigError(f"Only-category '{effective_only_category}' not found in WordPress.")
         only_category_id = categories[only_key]
 
     log.info('Fetching posts...')
-    posts = fetch_posts(posts_url, session, headers, limit=args.limit, category_id=only_category_id)
+    posts = fetch_posts(
+        posts_url,
+        session,
+        headers,
+        limit=args.limit,
+        category_id=only_category_id,
+        before_iso=before_iso
+    )
     log.info(f'Fetched {len(posts)} posts')
 
     report_fh = None
@@ -405,28 +611,39 @@ def main():
         excerpt = (post.get('excerpt') or {}).get('rendered', '')
         content = (post.get('content') or {}).get('rendered', '')
         existing_categories = post.get('categories') or []
-
-        if target_category_id in existing_categories:
+        if not args.recategorize_the250 and target_category_id in existing_categories:
             log.info(f"[{post_id}] already has category '{args.target_category}', skipping")
             skipped += 1
             continue
-
+        model_for_call = selected_model
+        selected_info = None
         try:
-            result = classify_post(
-                client,
-                args.model,
-                args.target_category,
-                title,
-                excerpt,
-                content,
-                args.max_chars
-            )
+            if args.recategorize_the250:
+                prompt, user_text = build_multi_category_prompt_payload(title, excerpt, content, args.max_chars)
+            else:
+                prompt, user_text = build_single_category_prompt_payload(
+                    args.target_category,
+                    title,
+                    excerpt,
+                    content,
+                    args.max_chars
+                )
+            if args.minimize_cost:
+                model_for_call, selected_info = select_min_cost_model(prompt, user_text, selected_model)
+            if selected_info:
+                log.info(
+                    f"[{post_id}] using model {model_for_call} "
+                    f"(est_input_tokens={selected_info.get('estimated_input_tokens')}, "
+                    f"est_output_tokens={selected_info.get('estimated_output_tokens')})"
+                )
+            else:
+                log.info(f"[{post_id}] using model {model_for_call}")
+            result = _classify_post_single_prompt(client, model_for_call, prompt, user_text)
         except Exception as e:
             log.error(f"[{post_id}] classification failed: {e}")
             skipped += 1
             continue
 
-        add_category = bool(result.get('add'))
         confidence_raw = result.get('confidence')
         try:
             confidence = float(confidence_raw) if confidence_raw is not None else 0.0
@@ -435,29 +652,85 @@ def main():
             log.warning(f"[{post_id}] invalid confidence value '{confidence_raw}', treating as 0.0")
         reason = result.get('reason')
 
-        if add_category and confidence >= args.min_confidence:
-            new_categories = list(existing_categories) + [target_category_id]
-            log.info(f"[{post_id}] add '{args.target_category}' (confidence={confidence}): {reason}")
+        if args.recategorize_the250:
+            chosen_categories = normalize_allowed_categories(result.get('categories') or [])
+            if confidence < args.min_confidence:
+                log.info(f"[{post_id}] no change (confidence={confidence} below min {args.min_confidence}): {reason}")
+                skipped += 1
+                continue
+            allowed_ids = set(allowed_category_ids.values())
+            preserved = [cid for cid in existing_categories if cid not in allowed_ids]
+            new_allowed_ids = [allowed_category_ids[name] for name in chosen_categories]
+            final_categories = []
+            seen_ids = set()
+            for cid in preserved + new_allowed_ids:
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                final_categories.append(cid)
             existing_names = [categories_by_id.get(cid, str(cid)) for cid in existing_categories]
-            new_names = [categories_by_id.get(cid, str(cid)) for cid in new_categories]
-            if not args.dry_run:
-                try:
-                    update_post_categories(posts_url, post_id, new_categories, session, headers)
-                    updated += 1
-                    updated_posts.append({
-                        'id': post_id,
-                        'title': title,
-                        'link': post.get('link'),
-                        'target_category': args.target_category,
-                        'categories_before': ';'.join(existing_names),
-                        'categories_after': ';'.join(new_names),
-                        'confidence': confidence,
-                        'dry_run': False
-                    })
-                except Exception as e:
-                    log.error(f"[{post_id}] update failed: {e}")
+            final_names = [categories_by_id.get(cid, str(cid)) for cid in final_categories]
+            if final_categories == existing_categories:
+                log.info(f"[{post_id}] no change (categories already match): {', '.join(chosen_categories) or '(none)'}")
+                skipped += 1
             else:
-                updated += 1
+                if selected_info:
+                    log.info(
+                        f"[{post_id}] set categories={chosen_categories} using {model_for_call} "
+                        f"(est_input_tokens={selected_info.get('estimated_input_tokens')}, "
+                        f"est_output_tokens={selected_info.get('estimated_output_tokens')})"
+                    )
+                else:
+                    log.info(f"[{post_id}] set categories={chosen_categories} using {model_for_call}")
+                if not args.dry_run:
+                    try:
+                        update_post_categories(posts_url, post_id, final_categories, session, headers)
+                        updated += 1
+                    except Exception as e:
+                        log.error(f"[{post_id}] update failed: {e}")
+                        skipped += 1
+                        continue
+                else:
+                    updated += 1
+                updated_posts.append({
+                    'id': post_id,
+                    'title': title,
+                    'link': post.get('link'),
+                    'target_category': 'MULTI',
+                    'categories_before': ';'.join(existing_names),
+                    'categories_after': ';'.join(final_names),
+                    'confidence': confidence,
+                    'model_used': model_for_call,
+                    'dry_run': args.dry_run
+                })
+            if report_fh:
+                report_fh.write(json.dumps({
+                    'id': post_id,
+                    'title': title,
+                    'link': post.get('link'),
+                    'predicted_categories': chosen_categories,
+                    'confidence': confidence,
+                    'reason': reason,
+                    'model_used': model_for_call,
+                    'dry_run': args.dry_run
+                }) + '\n')
+        else:
+            add_category = bool(result.get('add'))
+            if add_category and confidence >= args.min_confidence:
+                new_categories = list(existing_categories) + [target_category_id]
+                log.info(f"[{post_id}] add '{args.target_category}' using {model_for_call} (confidence={confidence}): {reason}")
+                existing_names = [categories_by_id.get(cid, str(cid)) for cid in existing_categories]
+                new_names = [categories_by_id.get(cid, str(cid)) for cid in new_categories]
+                if not args.dry_run:
+                    try:
+                        update_post_categories(posts_url, post_id, new_categories, session, headers)
+                        updated += 1
+                    except Exception as e:
+                        log.error(f"[{post_id}] update failed: {e}")
+                        skipped += 1
+                        continue
+                else:
+                    updated += 1
                 updated_posts.append({
                     'id': post_id,
                     'title': title,
@@ -466,27 +739,26 @@ def main():
                     'categories_before': ';'.join(existing_names),
                     'categories_after': ';'.join(new_names),
                     'confidence': confidence,
-                    'dry_run': True
+                    'model_used': model_for_call,
+                    'dry_run': args.dry_run
                 })
-        else:
-            if add_category and confidence < args.min_confidence:
-                log.info(
-                    f"[{post_id}] no change (confidence={confidence} below min {args.min_confidence}): {reason}"
-                )
             else:
-                log.info(f"[{post_id}] no change (confidence={confidence}): {reason}")
-            skipped += 1
-
-        if report_fh:
-            report_fh.write(json.dumps({
-                'id': post_id,
-                'title': title,
-                'link': post.get('link'),
-                'add_category': add_category,
-                'confidence': confidence,
-                'reason': reason,
-                'dry_run': args.dry_run
-            }) + '\n')
+                if add_category and confidence < args.min_confidence:
+                    log.info(f"[{post_id}] no change (confidence={confidence} below min {args.min_confidence}): {reason}")
+                else:
+                    log.info(f"[{post_id}] no change (confidence={confidence}): {reason}")
+                skipped += 1
+            if report_fh:
+                report_fh.write(json.dumps({
+                    'id': post_id,
+                    'title': title,
+                    'link': post.get('link'),
+                    'add_category': add_category,
+                    'confidence': confidence,
+                    'reason': reason,
+                    'model_used': model_for_call,
+                    'dry_run': args.dry_run
+                }) + '\n')
 
         time.sleep(args.sleep)
 
@@ -499,7 +771,7 @@ def main():
         with open(args.updated_csv, write_mode, newline='') as csvfile:
             fieldnames = [
                 'id', 'title', 'link', 'target_category',
-                'categories_before', 'categories_after', 'dry_run'
+                'categories_before', 'categories_after', 'dry_run', 'model_used'
             ]
             if args.confidence_column:
                 fieldnames.append('confidence')
