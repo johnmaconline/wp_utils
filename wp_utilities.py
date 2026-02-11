@@ -6,8 +6,13 @@
 #
 ##########################################################################################
 
-from tools.wp_utilities import *  # noqa: F401,F403
+import sys
+from tools import wp_utilities as _impl
 
+# Expose the implementation module directly so attribute monkeypatching on
+# `wp_utilities` affects function globals defined in `tools.wp_utilities`.
+if __name__ != '__main__':
+    sys.modules[__name__] = _impl
 
 if __name__ == '__main__':
     from tools.wp_utilities import main as _main
