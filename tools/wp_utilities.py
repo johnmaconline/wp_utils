@@ -30,6 +30,7 @@ import re
 from datetime import datetime, timedelta, time
 from urllib.parse import urlparse, unquote
 from zoneinfo import ZoneInfo
+from markdown import markdown as render_markdown
 
 # ****************************************************************************************
 # Global data and configuration
@@ -87,6 +88,10 @@ POST_NAVIGATION_BLOCKS = """<!-- wp:columns -->
 <div class="wp-block-column" style="flex-basis:25%"><!-- wp:post-navigation-link {"type":"next"} /--></div>
 <!-- /wp:column --></div>
 <!-- /wp:columns -->"""
+POST_NAVIGATION_BLOCKS_PATTERN = re.compile(
+    r'<!-- wp:columns -->.*?wp:post-navigation-link.*?<!-- /wp:columns -->',
+    re.DOTALL,
+)
 
 # ****************************************************************************************
 # Exceptions
@@ -407,6 +412,7 @@ def _select_columns(rows):
             'get-settings': ['key', 'value'],
             'get-themes': ['stylesheet', 'name', 'version', 'status'],
             'shift-scheduled': ['id', 'title', 'from', 'to'],
+            'backfill-post-navigation': ['id', 'title', 'status', 'date', 'action', 'dry_run', 'link'],
         }
         if op in op_map:
             return op_map[op]
@@ -1336,6 +1342,26 @@ def has_post_navigation_blocks(content: str) -> bool:
     return 'wp:post-navigation-link' in (content or '')
 
 
+def split_post_navigation_blocks(content: str) -> tuple[str, str]:
+    match = POST_NAVIGATION_BLOCKS_PATTERN.search(content or '')
+    if not match:
+        return (content or ''), ''
+    body = (content or '')[:match.start()].rstrip()
+    nav = match.group(0)
+    return body, nav
+
+
+def detect_post_body_format(content: str) -> str:
+    body = (content or '').strip()
+    if not body:
+        return 'empty'
+    if '<!-- wp:' in body:
+        return 'gutenberg'
+    if re.search(r'<(?:p|ul|ol|li|h[1-6]|blockquote|pre|figure|div|table|hr)\b', body, re.I):
+        return 'html'
+    return 'markdown'
+
+
 def ensure_post_navigation_blocks(content: str) -> str:
     if has_post_navigation_blocks(content):
         return content
@@ -1343,6 +1369,122 @@ def ensure_post_navigation_blocks(content: str) -> str:
     if not body:
         return POST_NAVIGATION_BLOCKS
     return f'{body}\n\n{POST_NAVIGATION_BLOCKS}'
+
+
+def normalize_post_navigation_content(content: str) -> tuple[str, str]:
+    body, nav = split_post_navigation_blocks(content)
+    body_format = detect_post_body_format(body)
+    normalized_body = body.rstrip()
+
+    if body_format == 'markdown':
+        normalized_body = render_markdown((body or '').strip())
+
+    if nav:
+        if not normalized_body:
+            return nav, body_format
+        return f'{normalized_body}\n\n{nav}', body_format
+
+    return ensure_post_navigation_blocks(normalized_body), body_format
+
+
+def fetch_wp_post_edit(url, headers, post_id):
+    posts_url = build_wp_api_posts_url(url)
+    if not posts_url:
+        raise ValueError('Invalid URL for WordPress API.')
+    response = requests.get(
+        posts_url.rstrip('/') + f'/{post_id}',
+        headers=headers,
+        params={'context': 'edit'},
+    )
+    if response.status_code >= 400:
+        raise ValueError(f'Failed to fetch post {post_id}: {response.status_code} {response.text}')
+    return response.json()
+
+
+def backfill_post_navigation(
+    url,
+    headers,
+    dry_run=False,
+    status='publish',
+    limit=None,
+    post_id=None,
+):
+    if post_id is not None:
+        posts = [fetch_wp_post_edit(url, headers, post_id)]
+    else:
+        params = {
+            'context': 'edit',
+            'status': status,
+            '_fields': 'id,slug,date,status,link,title',
+        }
+        posts = fetch_wp_endpoint(url, 'posts', headers, params=params)
+        if not isinstance(posts, list):
+            raise ValueError('Failed to fetch posts for backfill.')
+
+    rows = []
+    posts_url = build_wp_api_posts_url(url)
+    processed = 0
+    updated = 0
+    already = 0
+    skipped = 0
+
+    for post in posts:
+        if limit is not None and processed >= limit:
+            break
+        processed += 1
+        post_id = post.get('id')
+        detail = post if post_id is not None and 'content' in post else fetch_wp_post_edit(url, headers, post_id)
+        title_html = ((post.get('title') or {}).get('rendered', '')) if isinstance(post.get('title'), dict) else ''
+        title = BeautifulSoup(title_html, 'html.parser').get_text().strip() if title_html else ''
+        if not title:
+            detail_title_html = ((detail.get('title') or {}).get('rendered', '')) if isinstance(detail.get('title'), dict) else ''
+            title = BeautifulSoup(detail_title_html, 'html.parser').get_text().strip() if detail_title_html else ''
+        content_obj = detail.get('content') or {}
+        raw_content = content_obj.get('raw') or ''
+        row = {
+            'operation': 'backfill-post-navigation',
+            'id': post_id or '',
+            'title': title,
+            'status': detail.get('status') or post.get('status') or '',
+            'date': format_wp_api_date(detail.get('date') or post.get('date') or ''),
+            'link': detail.get('link') or post.get('link') or '',
+            'dry_run': str(bool(dry_run)),
+        }
+        if not raw_content:
+            row['action'] = 'skipped-no-raw-content'
+            rows.append(row)
+            skipped += 1
+            continue
+        if has_post_navigation_blocks(raw_content):
+            row['action'] = 'already-has-navigation'
+            rows.append(row)
+            already += 1
+            continue
+
+        updated_content, body_format = normalize_post_navigation_content(raw_content)
+        row['action'] = 'would-update' if dry_run else 'updated'
+        row['content_changed'] = str(updated_content != raw_content)
+        row['content_format'] = body_format
+        rows.append(row)
+        if dry_run:
+            updated += 1
+            continue
+
+        update_url = posts_url.rstrip('/') + f'/{post_id}'
+        response = requests.post(update_url, headers=headers, json={'content': updated_content})
+        if response.status_code >= 400:
+            raise ValueError(
+                f'Failed to update post {post_id}: {response.status_code} {response.text}'
+            )
+        updated += 1
+
+    stats = {
+        'processed': processed,
+        'already_has_navigation': already,
+        'needs_update': updated,
+        'skipped': skipped,
+    }
+    return rows, stats
 
 
 def build_schedule_payload(url, headers, content_md, meta, tz_name=DEFAULT_TIMEZONE, publish_date: Any | None = None):
@@ -1860,6 +2002,14 @@ def handle_args():
         action='store_true',
         help='Schedule a post via the REST API using markdown content and metadata JSON.')
     parser.add_argument(
+        '--backfill-post-navigation',
+        action='store_true',
+        help='Append Gutenberg previous/next navigation blocks to existing posts that do not already have them.')
+    parser.add_argument(
+        '--post-id',
+        type=int,
+        help='Specific WordPress post ID to target for --backfill-post-navigation.')
+    parser.add_argument(
         '--content-md',
         help='Path to markdown content file (use - for stdin) for --schedule-post')
     parser.add_argument(
@@ -2020,6 +2170,16 @@ def handle_args():
             except ValueError as exc:
                 log.error(f'XXX {exc}')
                 sys.exit(1)
+    if args.backfill_post_navigation:
+        if not args.url:
+            log.error('XXX Must supply a URL for --backfill-post-navigation')
+            sys.exit(1)
+        if not args.wp_username or not args.wp_app_password:
+            log.error('XXX Missing WP credentials for --backfill-post-navigation')
+            sys.exit(1)
+    if args.post_id and not args.backfill_post_navigation:
+        log.error('XXX --post-id requires --backfill-post-navigation')
+        sys.exit(1)
     if (args.get_plugins or args.list_posts or args.get_pages or args.get_categories or args.get_tags or
             args.get_users or args.get_user_me or args.get_media or args.get_comments or args.get_types or
             args.get_statuses or args.get_taxonomies or args.get_settings or args.get_themes) and not args.url:
@@ -2057,6 +2217,17 @@ def handle_args():
             log.info('+  Preview enabled (payload will be printed)')
         if args.force:
             log.info('+  Force enabled (skip update prompts)')
+    if args.backfill_post_navigation:
+        log.info('+  Backfilling post navigation blocks via WP API')
+        log.info(f'+  Target URL: {args.url}')
+        if args.post_id is not None:
+            log.info(f'+  Post ID: {args.post_id}')
+        else:
+            log.info(f'+  Post state: {args.post_state}')
+        if args.number is not None:
+            log.info(f'+  Limit: {args.number}')
+        if args.dry_run:
+            log.info('+  Dry run enabled (no posts will be updated)')
     if args.get_posts:
         log.info('+  Fetching posts via WP API')
         log.info(f'+  Target URL: {args.url}')
@@ -2104,7 +2275,7 @@ def handle_args():
     results_ops = [
         args.get_posts, args.list_posts, args.get_plugins, args.get_pages, args.get_categories, args.get_tags,
         args.get_users, args.get_user_me, args.get_media, args.get_comments, args.get_types, args.get_statuses,
-        args.get_taxonomies, args.get_settings, args.get_themes, args.schedule_post
+        args.get_taxonomies, args.get_settings, args.get_themes, args.schedule_post, args.backfill_post_navigation
     ]
     if any(results_ops):
         if not args.get_posts and args.url:
@@ -2114,6 +2285,8 @@ def handle_args():
             actions.append('get-posts (download)')
         if args.schedule_post:
             actions.append('schedule-post')
+        if args.backfill_post_navigation:
+            actions.append('backfill-post-navigation')
         if args.list_posts:
             actions.append('list-posts')
         if args.get_plugins:
@@ -2319,6 +2492,31 @@ def main():
             results_rows.append(row)
             op_counts['schedule-post'] = 1
             print(render_ascii_table([row]))
+        except ValueError as exc:
+            log.error(f'XXX {exc}')
+            sys.exit(1)
+    if args.backfill_post_navigation:
+        try:
+            status_map = {'published': 'publish', 'scheduled': 'future', 'draft': 'draft'}
+            rows, stats = backfill_post_navigation(
+                args.url,
+                headers,
+                dry_run=args.dry_run,
+                status=status_map.get(args.post_state, 'publish'),
+                limit=args.number,
+                post_id=args.post_id,
+            )
+            op_counts['backfill-post-navigation'] = len(rows)
+            results_rows.extend(rows)
+            if rows:
+                print(render_ascii_table(rows))
+            log.info(
+                '+  Backfill summary: '
+                f'processed={stats["processed"]}, '
+                f'already_has_navigation={stats["already_has_navigation"]}, '
+                f'needs_update={stats["needs_update"]}, '
+                f'skipped={stats["skipped"]}'
+            )
         except ValueError as exc:
             log.error(f'XXX {exc}')
             sys.exit(1)

@@ -122,6 +122,197 @@ def test_schedule_post_wp_api_dry_run_adds_navigation_blocks(monkeypatch):
     assert result["payload"]["content"].count("wp:post-navigation-link") == 2
 
 
+def test_normalize_post_navigation_content_converts_markdown(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda text: f"<p>{text.replace(chr(10) * 2, '</p><p>')}</p>",
+    )
+    updated, body_format = wp_utilities.normalize_post_navigation_content(
+        "Line one\n\nLine two"
+    )
+
+    assert body_format == "markdown"
+    assert "<p>Line one</p>" in updated
+    assert "<p>Line two</p>" in updated
+    assert updated.count("wp:post-navigation-link") == 2
+
+
+def test_backfill_post_navigation_dry_run(monkeypatch):
+    posts = [
+        {
+            "id": 1,
+            "status": "publish",
+            "date": "2026-01-27T08:44:00",
+            "link": "https://example.com/one/",
+            "title": {"rendered": "One"},
+        },
+        {
+            "id": 2,
+            "status": "publish",
+            "date": "2026-01-28T08:44:00",
+            "link": "https://example.com/two/",
+            "title": {"rendered": "Two"},
+        },
+    ]
+    monkeypatch.setattr(wp_utilities, "fetch_wp_endpoint", lambda *_args, **_kwargs: posts)
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda text: f"<p>{text.replace(chr(10) * 2, '</p><p>')}</p>",
+    )
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_post_edit",
+        lambda *args, **_kwargs: {
+            1: {
+                "id": 1,
+                "status": "publish",
+                "date": "2026-01-27T08:44:00",
+                "link": "https://example.com/one/",
+                "title": {"rendered": "One"},
+                "content": {"raw": "Hello\n\nWorld"},
+            },
+            2: {
+                "id": 2,
+                "status": "publish",
+                "date": "2026-01-28T08:44:00",
+                "link": "https://example.com/two/",
+                "title": {"rendered": "Two"},
+                "content": {"raw": wp_utilities.POST_NAVIGATION_BLOCKS},
+            },
+        }[args[2]],
+    )
+
+    rows, stats = wp_utilities.backfill_post_navigation(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        dry_run=True,
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["action"] == "would-update"
+    assert rows[0]["content_format"] == "markdown"
+    assert rows[1]["action"] == "already-has-navigation"
+    assert stats == {
+        "processed": 2,
+        "already_has_navigation": 1,
+        "needs_update": 1,
+        "skipped": 0,
+    }
+
+
+def test_backfill_post_navigation_updates_post(monkeypatch):
+    posts = [
+        {
+            "id": 3,
+            "status": "publish",
+            "date": "2026-01-29T08:44:00",
+            "link": "https://example.com/three/",
+            "title": {"rendered": "Three"},
+        }
+    ]
+    monkeypatch.setattr(wp_utilities, "fetch_wp_endpoint", lambda *_args, **_kwargs: posts)
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda text: f"<p>{text.replace(chr(10) * 2, '</p><p>')}</p>",
+    )
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_post_edit",
+        lambda *_args, **_kwargs: {
+            "id": 3,
+            "status": "publish",
+            "date": "2026-01-29T08:44:00",
+            "link": "https://example.com/three/",
+            "title": {"rendered": "Three"},
+            "content": {"raw": "Hello\n\nWorld"},
+        },
+    )
+
+    captured = {}
+
+    class DummyResponse:
+        status_code = 200
+        text = "ok"
+
+    def fake_post(url, headers=None, json=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        return DummyResponse()
+
+    monkeypatch.setattr(wp_utilities.requests, "post", fake_post)
+
+    rows, stats = wp_utilities.backfill_post_navigation(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        dry_run=False,
+    )
+
+    assert rows[0]["action"] == "updated"
+    assert captured["url"] == "https://example.com/wp-json/wp/v2/posts/3"
+    assert captured["json"]["content"].count("wp:post-navigation-link") == 2
+    assert "<p>Hello</p>" in captured["json"]["content"]
+    assert "<p>World</p>" in captured["json"]["content"]
+    assert stats["needs_update"] == 1
+
+
+def test_backfill_post_navigation_specific_post_id(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda text: f"<p>{text.replace(chr(10) * 2, '</p><p>')}</p>",
+    )
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_post_edit",
+        lambda *_args, **_kwargs: {
+            "id": 42,
+            "status": "publish",
+            "date": "2026-03-10T08:44:00",
+            "link": "https://example.com/forty-two/",
+            "title": {"rendered": "Forty Two"},
+            "content": {"raw": "First para\n\nSecond para"},
+        },
+    )
+
+    def fail_fetch_endpoint(*_args, **_kwargs):
+        raise AssertionError("fetch_wp_endpoint should not be used for --post-id")
+
+    monkeypatch.setattr(wp_utilities, "fetch_wp_endpoint", fail_fetch_endpoint)
+
+    captured = {}
+
+    class DummyResponse:
+        status_code = 200
+        text = "ok"
+
+    def fake_post(url, headers=None, json=None):
+        captured["url"] = url
+        captured["json"] = json
+        return DummyResponse()
+
+    monkeypatch.setattr(wp_utilities.requests, "post", fake_post)
+
+    rows, stats = wp_utilities.backfill_post_navigation(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        dry_run=False,
+        post_id=42,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == 42
+    assert rows[0]["action"] == "updated"
+    assert rows[0]["content_format"] == "markdown"
+    assert captured["url"] == "https://example.com/wp-json/wp/v2/posts/42"
+    assert "<p>First para</p>" in captured["json"]["content"]
+    assert stats["processed"] == 1
+    assert stats["needs_update"] == 1
+
+
 def test_sanitize_filename():
     assert wp_utilities.sanitize_filename("Hello, World!") == "Hello-_World-"
 
