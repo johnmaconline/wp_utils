@@ -85,6 +85,43 @@ def test_extract_text_from_html(monkeypatch, tmp_path):
     assert "[image: images/fake.png]" in content
 
 
+def test_ensure_post_navigation_blocks_appends_once():
+    content = "Hello world"
+    updated = wp_utilities.ensure_post_navigation_blocks(content)
+    assert updated.startswith("Hello world")
+    assert updated.count("wp:post-navigation-link") == 2
+    assert '"type":"previous"' in updated
+    assert '"type":"next"' in updated
+
+
+def test_ensure_post_navigation_blocks_is_idempotent():
+    content = "Hello world\n\n" + wp_utilities.POST_NAVIGATION_BLOCKS
+    updated = wp_utilities.ensure_post_navigation_blocks(content)
+    assert updated == content
+
+
+def test_schedule_post_wp_api_dry_run_adds_navigation_blocks(monkeypatch):
+    monkeypatch.setattr(wp_utilities, "resolve_term_ids", lambda *_args, **_kwargs: [123])
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_latest_scheduled_date",
+        lambda *_args, **_kwargs: datetime.datetime(2026, 1, 27, 8, 44),
+    )
+    monkeypatch.setattr(wp_utilities, "find_post_by_slug", lambda *_args, **_kwargs: None)
+
+    result = wp_utilities.schedule_post_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "Body copy",
+        {"title": "My Post", "categories": ["AI"], "tags": ["tag-one"]},
+        dry_run=True,
+    )
+
+    assert result["action"] == "create"
+    assert result["payload"]["content"].startswith("Body copy")
+    assert result["payload"]["content"].count("wp:post-navigation-link") == 2
+
+
 def test_sanitize_filename():
     assert wp_utilities.sanitize_filename("Hello, World!") == "Hello-_World-"
 

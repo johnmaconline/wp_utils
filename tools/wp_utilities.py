@@ -74,6 +74,19 @@ EXPORT_RESOURCES = {
     'plugins',
 }
 DEFAULT_TIMEZONE = 'America/New_York'
+POST_NAVIGATION_BLOCKS = """<!-- wp:columns -->
+<div class="wp-block-columns"><!-- wp:column {"width":"25%"} -->
+<div class="wp-block-column" style="flex-basis:25%"><!-- wp:post-navigation-link {"type":"previous"} /--></div>
+<!-- /wp:column -->
+
+<!-- wp:column {"width":"50%"} -->
+<div class="wp-block-column" style="flex-basis:50%"></div>
+<!-- /wp:column -->
+
+<!-- wp:column {"width":"25%"} -->
+<div class="wp-block-column" style="flex-basis:25%"><!-- wp:post-navigation-link {"type":"next"} /--></div>
+<!-- /wp:column --></div>
+<!-- /wp:columns -->"""
 
 # ****************************************************************************************
 # Exceptions
@@ -1319,6 +1332,19 @@ def format_shift_report(shifted: list[dict[str, Any]]):
     return report
 
 
+def has_post_navigation_blocks(content: str) -> bool:
+    return 'wp:post-navigation-link' in (content or '')
+
+
+def ensure_post_navigation_blocks(content: str) -> str:
+    if has_post_navigation_blocks(content):
+        return content
+    body = (content or '').rstrip()
+    if not body:
+        return POST_NAVIGATION_BLOCKS
+    return f'{body}\n\n{POST_NAVIGATION_BLOCKS}'
+
+
 def build_schedule_payload(url, headers, content_md, meta, tz_name=DEFAULT_TIMEZONE, publish_date: Any | None = None):
     title = meta.get('title') or meta.get('post_title')
     if not title:
@@ -1449,6 +1475,7 @@ def _confirm_update(existing, slug, force=False):
 
 
 def schedule_post_wp_api(url, headers, content_md, meta, dry_run=False, preview=False, tz_name=DEFAULT_TIMEZONE, force=False, publish_date: Any | None = None):
+    content_md = ensure_post_navigation_blocks(content_md)
     payload, schedule_dt = build_schedule_payload(url, headers, content_md, meta, tz_name, publish_date=publish_date)
     existing = find_post_by_slug(url, headers, payload.get('slug', ''))
     if existing:
