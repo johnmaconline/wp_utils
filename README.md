@@ -171,7 +171,9 @@ Args:
 - `--outfile` Output file base name for suggestions (defaults to out.<format> if omitted)
 - `--outfile-format` Output format for suggestions file: `json` or `csv` (default: `json`)
 
-Pricing estimates (used by `wp_agent.py` and `categorize_wp_posts.py` for cost logging, USD per 1M tokens, input/output; OpenAI API pricing verified on 2026-02-10):
+Pricing estimates (used by `wp_agent.py` and `categorize_wp_posts.py` for cost logging, USD per 1M tokens, input/output; OpenAI API pricing verified on 2026-03-10):
+- `gpt-5.4`: $2.50 / $20.00
+- `gpt-5-pro`: $15.00 / $120.00
 - `gpt-5-nano`: $0.05 / $0.40
 - `gpt-5-mini`: $0.25 / $2.00
 - `gpt-5`: $1.25 / $10.00
@@ -180,6 +182,9 @@ Pricing estimates (used by `wp_agent.py` and `categorize_wp_posts.py` for cost l
 - `gpt-5.2-chat-latest`: $1.75 / $14.00
 - `gpt-5.1`: $1.25 / $10.00
 - `gpt-5.1-chat-latest`: $1.25 / $10.00
+- `gpt-4.1`: $2.00 / $8.00
+- `gpt-4.1-mini`: $0.40 / $1.60
+- `gpt-4.1-nano`: $0.10 / $0.40
 - `gpt-4o`: $2.50 / $10.00
 - `gpt-4o-mini`: $0.15 / $0.60
 

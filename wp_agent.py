@@ -75,6 +75,8 @@ QUALITY_PROFILE_RULES = {
 
 # Simple price table (USD per 1M tokens, standard processing)
 PRICE_TABLE_DEFAULT = {
+    'gpt-5.4': {'in_per_m': 2.50, 'out_per_m': 20.00},
+    'gpt-5-pro': {'in_per_m': 15.00, 'out_per_m': 120.00},
     'gpt-5-nano': {'in_per_m': 0.05, 'out_per_m': 0.40},
     'gpt-5-mini': {'in_per_m': 0.25, 'out_per_m': 2.00},
     'gpt-5': {'in_per_m': 1.25, 'out_per_m': 10.00},
@@ -83,6 +85,9 @@ PRICE_TABLE_DEFAULT = {
     'gpt-5.2-chat-latest': {'in_per_m': 1.75, 'out_per_m': 14.00},
     'gpt-5.1': {'in_per_m': 1.25, 'out_per_m': 10.00},
     'gpt-5.1-chat-latest': {'in_per_m': 1.25, 'out_per_m': 10.00},
+    'gpt-4.1': {'in_per_m': 2.00, 'out_per_m': 8.00},
+    'gpt-4.1-mini': {'in_per_m': 0.40, 'out_per_m': 1.60},
+    'gpt-4.1-nano': {'in_per_m': 0.10, 'out_per_m': 0.40},
     'gpt-4o': {'in_per_m': 2.50, 'out_per_m': 10.00},
     'gpt-4o-mini': {'in_per_m': 0.15, 'out_per_m': 0.60},
 }
