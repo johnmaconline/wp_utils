@@ -400,6 +400,7 @@ def _select_columns(rows):
             'get-posts': ['title', 'date', 'url', 'txt', 'md', 'docx', 'meta'],
             'list-posts': ['id', 'title', 'status', 'date', 'link'],
             'get-pages': ['id', 'title', 'status', 'date', 'link'],
+            'update-page': ['id', 'title', 'status', 'action', 'dry_run', 'content_changed', 'link'],
             'get-categories': ['id', 'name', 'slug', 'count', 'parent', 'description'],
             'get-tags': ['id', 'name', 'slug', 'count', 'description'],
             'get-users': ['id', 'name', 'registered_date', 'roles', 'capabilities'],
@@ -596,6 +597,26 @@ def build_wp_api_posts_url(url):
     if not base:
         return ''
     return base.rstrip('/') + '/wp-json/wp/v2/posts'
+
+
+def build_wp_api_pages_url(url):
+    url = (url or '').strip()
+    if not url:
+        return ''
+    normalized = url.rstrip('/')
+
+    if '/wp-json/' in normalized:
+        if normalized.endswith('/wp/v2/pages'):
+            return normalized
+        if normalized.endswith('/wp-json/wp/v2'):
+            return normalized + '/pages'
+        if normalized.endswith('/wp-json'):
+            return normalized + '/wp/v2/pages'
+
+    base = build_wp_api_base(normalized)
+    if not base:
+        return ''
+    return base.rstrip('/') + '/wp-json/wp/v2/pages'
 
 def build_wp_api_plugins_url(url):
     base = build_wp_api_base(url)
@@ -1401,6 +1422,66 @@ def fetch_wp_post_edit(url, headers, post_id):
     return response.json()
 
 
+def fetch_wp_page_edit(url, headers, page_id):
+    pages_url = build_wp_api_pages_url(url)
+    if not pages_url:
+        raise ValueError('Invalid URL for WordPress API.')
+    response = requests.get(
+        pages_url.rstrip('/') + f'/{page_id}',
+        headers=headers,
+        params={'context': 'edit'},
+    )
+    if response.status_code >= 400:
+        raise ValueError(f'Failed to fetch page {page_id}: {response.status_code} {response.text}')
+    return response.json()
+
+
+def prepare_wp_page_content(html_content: str) -> str:
+    content = (html_content or '').strip()
+    if not content:
+        return ''
+    if content.startswith('<!-- wp:html -->'):
+        return content
+    return f'<!-- wp:html -->\n{content}\n<!-- /wp:html -->'
+
+
+def update_page_wp_api(url, headers, page_id, html_content, dry_run=False):
+    detail = fetch_wp_page_edit(url, headers, page_id)
+    pages_url = build_wp_api_pages_url(url)
+    title_html = ((detail.get('title') or {}).get('rendered', '')) if isinstance(detail.get('title'), dict) else ''
+    title = BeautifulSoup(title_html, 'html.parser').get_text().strip() if title_html else ''
+    current_content = ((detail.get('content') or {}).get('raw') or '')
+    prepared_content = prepare_wp_page_content(html_content)
+    content_changed = prepared_content != current_content
+
+    row = {
+        'operation': 'update-page',
+        'id': page_id,
+        'title': title,
+        'status': detail.get('status') or '',
+        'link': detail.get('link') or '',
+        'dry_run': str(bool(dry_run)),
+        'content_changed': str(bool(content_changed)),
+    }
+
+    if not content_changed:
+        row['action'] = 'skipped-no-change'
+        return row
+
+    row['action'] = 'would-update' if dry_run else 'updated'
+    if dry_run:
+        return row
+
+    update_url = pages_url.rstrip('/') + f'/{page_id}'
+    response = requests.post(update_url, headers=headers, json={'content': prepared_content})
+    if response.status_code >= 400:
+        raise ValueError(f'Failed to update page {page_id}: {response.status_code} {response.text}')
+    updated = response.json()
+    row['status'] = updated.get('status') or row['status']
+    row['link'] = updated.get('link') or row['link']
+    return row
+
+
 def backfill_post_navigation(
     url,
     headers,
@@ -2006,12 +2087,23 @@ def handle_args():
         action='store_true',
         help='Append Gutenberg previous/next navigation blocks to existing posts that do not already have them.')
     parser.add_argument(
+        '--update-page',
+        action='store_true',
+        help='Replace a WordPress page content body with the contents of an HTML file.')
+    parser.add_argument(
         '--post-id',
         type=int,
         help='Specific WordPress post ID to target for --backfill-post-navigation.')
     parser.add_argument(
+        '--page-id',
+        type=int,
+        help='Specific WordPress page ID to target for --update-page.')
+    parser.add_argument(
         '--content-md',
         help='Path to markdown content file (use - for stdin) for --schedule-post')
+    parser.add_argument(
+        '--html-file',
+        help='Path to an HTML file for --update-page')
     parser.add_argument(
         '--meta-json',
         help='Path to metadata JSON file for --schedule-post')
@@ -2177,8 +2269,24 @@ def handle_args():
         if not args.wp_username or not args.wp_app_password:
             log.error('XXX Missing WP credentials for --backfill-post-navigation')
             sys.exit(1)
+    if args.update_page:
+        if not args.url:
+            log.error('XXX Must supply a URL for --update-page')
+            sys.exit(1)
+        if not args.wp_username or not args.wp_app_password:
+            log.error('XXX Missing WP credentials for --update-page')
+            sys.exit(1)
+        if not args.page_id:
+            log.error('XXX Must supply --page-id for --update-page')
+            sys.exit(1)
+        if not args.html_file:
+            log.error('XXX Must supply --html-file for --update-page')
+            sys.exit(1)
     if args.post_id and not args.backfill_post_navigation:
         log.error('XXX --post-id requires --backfill-post-navigation')
+        sys.exit(1)
+    if args.page_id and not args.update_page:
+        log.error('XXX --page-id requires --update-page')
         sys.exit(1)
     if (args.get_plugins or args.list_posts or args.get_pages or args.get_categories or args.get_tags or
             args.get_users or args.get_user_me or args.get_media or args.get_comments or args.get_types or
@@ -2228,6 +2336,13 @@ def handle_args():
             log.info(f'+  Limit: {args.number}')
         if args.dry_run:
             log.info('+  Dry run enabled (no posts will be updated)')
+    if args.update_page:
+        log.info('+  Updating page via WP API')
+        log.info(f'+  Target URL: {args.url}')
+        log.info(f'+  Page ID: {args.page_id}')
+        log.info(f'+  HTML file: {args.html_file}')
+        if args.dry_run:
+            log.info('+  Dry run enabled (no page will be updated)')
     if args.get_posts:
         log.info('+  Fetching posts via WP API')
         log.info(f'+  Target URL: {args.url}')
@@ -2275,7 +2390,8 @@ def handle_args():
     results_ops = [
         args.get_posts, args.list_posts, args.get_plugins, args.get_pages, args.get_categories, args.get_tags,
         args.get_users, args.get_user_me, args.get_media, args.get_comments, args.get_types, args.get_statuses,
-        args.get_taxonomies, args.get_settings, args.get_themes, args.schedule_post, args.backfill_post_navigation
+        args.get_taxonomies, args.get_settings, args.get_themes, args.schedule_post, args.backfill_post_navigation,
+        args.update_page
     ]
     if any(results_ops):
         if not args.get_posts and args.url:
@@ -2287,6 +2403,8 @@ def handle_args():
             actions.append('schedule-post')
         if args.backfill_post_navigation:
             actions.append('backfill-post-navigation')
+        if args.update_page:
+            actions.append('update-page')
         if args.list_posts:
             actions.append('list-posts')
         if args.get_plugins:
@@ -2517,6 +2635,26 @@ def main():
                 f'needs_update={stats["needs_update"]}, '
                 f'skipped={stats["skipped"]}'
             )
+        except ValueError as exc:
+            log.error(f'XXX {exc}')
+            sys.exit(1)
+    if args.update_page:
+        try:
+            with open(args.html_file, 'r', encoding='utf-8') as file:
+                html_content = file.read()
+            row = update_page_wp_api(
+                args.url,
+                headers,
+                args.page_id,
+                html_content,
+                dry_run=args.dry_run,
+            )
+            results_rows.append(row)
+            op_counts['update-page'] = 1
+            print(render_ascii_table([row]))
+        except OSError as exc:
+            log.error(f'XXX Failed to read HTML file: {exc}')
+            sys.exit(1)
         except ValueError as exc:
             log.error(f'XXX {exc}')
             sys.exit(1)

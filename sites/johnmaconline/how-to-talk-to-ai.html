@@ -1,0 +1,1723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How to Talk to AI</title>
+  <meta
+    name="description"
+    content="A practical, copy and paste guide for beginners who want better results from AI chat tools."
+  >
+  <style>
+    :root {
+      --bg: #f6f8ff;
+      --card: #ffffff;
+      --ink: #0f172a;
+      --muted: #475569;
+      --accent: #2563eb;
+      --accent2: #0ea5e9;
+      --border: rgba(15, 23, 42, 0.22);
+      --shadow: 0 12px 30px rgba(15, 23, 42, 0.10);
+      --code-bg: #f8fafc;
+      --code-border: rgba(15, 23, 42, 0.30);
+      --radius: 16px;
+    }
+
+    body.page-id-55217 .entry-header,
+    body.page-id-55217 .et_pb_post_title,
+    body.page-id-55217 .et_pb_title_container,
+    body.page-id-55217 .et_pb_title_container h1,
+    body.page-id-55217 .entry-title,
+    body.page-id-55217 h1.entry-title {
+      display: none !important;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% 0%, rgba(37, 99, 235, 0.12), transparent 60%),
+        radial-gradient(900px 500px at 90% 20%, rgba(14, 165, 233, 0.10), transparent 55%),
+        var(--bg);
+      line-height: 1.45;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .container {
+      width: min(1060px, calc(100% - 36px));
+      margin: 0 auto;
+    }
+
+    .hero {
+      padding: 56px 0 18px 0;
+    }
+
+    .hero-card {
+      background: linear-gradient(135deg, rgba(37,99,235,0.16), rgba(14,165,233,0.10));
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) + 8px);
+      box-shadow: var(--shadow);
+      padding: 28px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .hero-card:before {
+      content: "";
+      position: absolute;
+      inset: -2px;
+      background:
+        radial-gradient(600px 220px at 18% 18%, rgba(37,99,235,0.22), transparent 60%),
+        radial-gradient(520px 240px at 85% 30%, rgba(14,165,233,0.18), transparent 55%);
+      pointer-events: none;
+    }
+
+    .hero-inner {
+      position: relative;
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    @media (max-width: 860px) {
+      .hero-inner { grid-template-columns: 1fr; }
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(15,23,42,0.18);
+      background: rgba(255,255,255,0.60);
+      width: fit-content;
+      margin-bottom: 12px;
+      font-weight: 700;
+    }
+
+    .badge:hover {
+      text-decoration: none;
+      background: rgba(255,255,255,0.82);
+    }
+
+    h1 {
+      margin: 0 0 10px 0;
+      font-size: clamp(32px, 4vw, 46px);
+      line-height: 1.06;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      margin: 0 0 14px 0;
+      font-size: 16px;
+      color: var(--muted);
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 14px;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+
+    .btn {
+      appearance: none;
+      border: 1px solid rgba(15,23,42,0.22);
+      background: rgba(255,255,255,0.80);
+      color: var(--ink);
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 120ms ease, box-shadow 120ms ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 18px rgba(15,23,42,0.10);
+      text-decoration: none;
+    }
+
+    .btn.primary {
+      background: linear-gradient(135deg, rgba(37,99,235,0.95), rgba(14,165,233,0.85));
+      border: 1px solid rgba(37,99,235,0.55);
+      color: white;
+    }
+
+    .hero-narrative {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      backdrop-filter: blur(10px);
+      background: rgba(246,248,255,0.72);
+      border-bottom: 1px solid rgba(15,23,42,0.10);
+    }
+
+    .nav-inner {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 0;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .nav-links a {
+      font-size: 13px;
+      color: var(--muted);
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+    }
+
+    .nav-links a:hover {
+      color: var(--ink);
+      border-color: rgba(15,23,42,0.15);
+      text-decoration: none;
+      background: rgba(255,255,255,0.65);
+    }
+
+    .section {
+      padding: 22px 0;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px;
+    }
+
+    h2 {
+      margin: 0 0 10px 0;
+      font-size: 22px;
+      letter-spacing: -0.01em;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .grid-2 {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: 1fr 1fr;
+    }
+
+    @media (max-width: 860px) {
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+
+    .grid-3 {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(3, 1fr);
+    }
+
+    @media (max-width: 860px) {
+      .grid-3 { grid-template-columns: 1fr; }
+    }
+
+    ul {
+      margin: 10px 0 0 0;
+      padding-left: 18px;
+    }
+
+    .code-card {
+      border: 1px solid var(--code-border);
+      border-radius: 14px;
+      overflow: hidden;
+      margin-top: 12px;
+      background: var(--code-bg);
+    }
+
+    .code-card.compact pre {
+      max-height: none;
+    }
+
+    .code-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(15,23,42,0.18);
+      background: rgba(255,255,255,0.65);
+    }
+
+    .code-label {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    pre {
+      margin: 0;
+      padding: 14px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 13.5px;
+      line-height: 1.35;
+    }
+
+    .copy-btn {
+      border: 1px solid rgba(15,23,42,0.22);
+      background: rgba(255,255,255,0.95);
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-weight: 700;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .copy-btn.copied {
+      background: rgba(37,99,235,0.12);
+      border-color: rgba(37,99,235,0.40);
+      color: rgba(37,99,235,0.95);
+    }
+
+    .rule-card {
+      border: 1px solid rgba(15,23,42,0.14);
+      border-radius: var(--radius);
+      background: rgba(255,255,255,0.90);
+      padding: 16px;
+      margin-top: 14px;
+    }
+
+    .rule-head {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+    }
+
+    .rule-num {
+      width: 34px;
+      height: 34px;
+      border-radius: 12px;
+      background: rgba(37,99,235,0.10);
+      border: 1px solid rgba(37,99,235,0.22);
+      color: rgba(37,99,235,0.95);
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      flex: 0 0 auto;
+    }
+
+    .rule-meta h3 {
+      margin: 0;
+      font-size: 16px;
+    }
+
+    .rule-meta p {
+      margin: 4px 0 0 0;
+      font-size: 13px;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(15,23,42,0.14);
+      background: rgba(255,255,255,0.80);
+      color: var(--muted);
+      font-weight: 700;
+      font-size: 12px;
+      text-decoration: none;
+    }
+
+    .chip:hover {
+      color: var(--ink);
+      text-decoration: none;
+      border-color: rgba(15,23,42,0.22);
+    }
+
+    .template-card {
+      margin-top: 18px;
+      padding: 18px;
+      border-radius: var(--radius);
+      border: 1px solid rgba(15,23,42,0.14);
+      background: rgba(255,255,255,0.92);
+      box-shadow: var(--shadow);
+    }
+
+    .template-head h3 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .template-head p {
+      margin: 6px 0 0 0;
+      font-size: 13px;
+    }
+
+    .note-box {
+      margin: 12px 0;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(37,99,235,0.22);
+      background: rgba(37,99,235,0.08);
+      color: var(--ink);
+    }
+
+    .note-box strong {
+      color: var(--accent);
+    }
+
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+    }
+
+    .vendor-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid rgba(15,23,42,0.28);
+      font-size: 13px;
+    }
+
+    .vendor-table th,
+    .vendor-table td {
+      border: 1px solid rgba(15,23,42,0.28);
+      padding: 10px;
+      vertical-align: top;
+      text-align: left;
+    }
+
+    .vendor-table thead th {
+      background: rgba(255,255,255,0.85);
+      font-weight: 700;
+    }
+
+    .vendor-table tbody th {
+      background: rgba(255,255,255,0.65);
+      font-weight: 700;
+      width: 140px;
+    }
+
+    .traffic-layout {
+      display: grid;
+      gap: 18px;
+      grid-template-columns: 180px 1fr;
+      align-items: start;
+      margin-top: 12px;
+    }
+
+    @media (max-width: 860px) {
+      .traffic-layout { grid-template-columns: 1fr; }
+    }
+
+    .traffic-light {
+      width: 150px;
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+    }
+
+    .traffic-col {
+      border: 1px solid rgba(15,23,42,0.12);
+      border-radius: 14px;
+      padding: 12px;
+      background: rgba(255,255,255,0.85);
+    }
+
+    .traffic-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      margin: 0 0 6px 0;
+    }
+
+    .traffic-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      display: inline-block;
+      border: 1px solid rgba(15,23,42,0.18);
+    }
+
+    .traffic-dot.red { background: #ef4444; }
+    .traffic-dot.yellow { background: #f59e0b; }
+    .traffic-dot.green { background: #22c55e; }
+
+    .footer {
+      padding: 30px 0 60px 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .float-top {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      border: 1px solid rgba(15,23,42,0.20);
+      background: rgba(255,255,255,0.85);
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 10px 12px;
+      cursor: pointer;
+      font-weight: 800;
+      box-shadow: 0 10px 20px rgba(15,23,42,0.10);
+    }
+
+    .float-top:hover {
+      background: rgba(255,255,255,1);
+    }
+
+    @media print {
+      .nav, .copy-btn, .float-top, .hero-actions { display: none !important; }
+      body { background: white; }
+      .card, .template-card, .rule-card, .hero-card { box-shadow: none; }
+      .template-card { break-before: page; }
+      .code-card { background: white; }
+      pre { font-size: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero" id="top">
+    <div class="container">
+      <div class="hero-card">
+        <div class="hero-inner">
+          <div>
+            <a class="badge" href="https://johnmaconline.com/">Home</a>
+            <h1>How to Talk to AI</h1>
+            <p class="subtitle">
+              A practical copy and paste guide for beginners and for people who want to move from beginner to better.
+            </p>
+            <div class="hero-actions">
+              <button
+                class="btn primary"
+                type="button"
+                onclick="document.getElementById('templates').scrollIntoView({behavior:'smooth'})"
+              >
+                Jump to templates
+              </button>
+              <button class="btn" type="button" onclick="window.print()">Print to PDF</button>
+            </div>
+            <p class="meta">By John Mac. Updated 2026-03-12.</p>
+          </div>
+          <div>
+            <p class="hero-narrative">
+              Use this guide like a playbook. Start with the quick start. Learn what AI is good at and where it fails.
+              Use the boss rules to add context, constraints, and better follow up moves. Then steal a template,
+              paste it into your AI tool, and improve it as you go.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="nav">
+    <div class="container">
+      <div class="nav-inner">
+        <div class="nav-links">
+          <a href="https://johnmaconline.com/">Home</a>
+          <a href="#quickstart">Quick Start</a>
+          <a href="#good-bad">What AI Is Good At</a>
+          <a href="#privacy">Personal Privacy Rules</a>
+          <a href="#work-privacy">Work Privacy Rules</a>
+          <a href="#vendor-differences">Vendor Differences</a>
+          <a href="#rules">Boss Rules</a>
+          <a href="#templates">Templates</a>
+          <a href="#followups">Follow Ups</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <main class="container">
+    <section class="section" id="quickstart">
+      <div class="card">
+        <h2>The 5 Minute Quick Start</h2>
+        <p class="muted">
+          If you read nothing else in this guide, start here. This is still a great starting template for just about
+          anything you want the LLM to do. If you do not know which template to use, use this one first. Then apply
+          the boss rules to add context, constraints, questions, and sources.
+        </p>
+
+        <div class="code-card">
+          <div class="code-head">
+            <div class="code-label">Boss Prompt (copy and paste)</div>
+            <button class="copy-btn" type="button" onclick="copyToClipboard('code-boss-quickstart', this)">Copy</button>
+          </div>
+          <pre><code id="code-boss-quickstart">You are my assistant.
+
+Role: [ROLE]
+Goal: [GOAL]
+
+Context:
+[PASTE CONTEXT]
+
+Output:
+- Format: [FORMAT]
+- Length: [LENGTH]
+- Tone: [TONE]
+
+Rules:
+- If anything is missing, ask me up to 7 questions before you answer.
+- If you are unsure, say so. Do not make things up.
+- Use plain English.
+- When useful, give me 2 to 3 options and recommend one.
+- If this depends on current facts, use current sources and link them.
+- If this would be better with a file, screenshot, or document, tell me what to upload.
+
+Start by asking your questions. Then wait.</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="good-bad">
+      <div class="card">
+        <h2>What AI Is Good At and What It Is Not Good At</h2>
+        <div class="grid-2">
+          <div>
+            <h3 style="margin:0; font-size:16px; color: var(--accent);">Good At</h3>
+            <ul>
+              <li>Turning messy thoughts into a cleaner draft</li>
+              <li>Brainstorming options and angles</li>
+              <li>Summarizing, rewriting, and translating</li>
+              <li>Creating checklists, plans, and step sequences</li>
+              <li>Explaining something at different levels</li>
+              <li>Working with real inputs like documents, screenshots, and pasted notes</li>
+            </ul>
+          </div>
+          <div>
+            <h3 style="margin:0; font-size:16px; color: var(--accent);">Not Good At</h3>
+            <ul>
+              <li>Reading your mind</li>
+              <li>Being perfectly consistent. Ask twice and you may get different answers.</li>
+              <li>Being automatically correct. It can sound confident and still be wrong.</li>
+              <li>Knowing what changed recently unless it checks current sources</li>
+              <li>Keeping secrets safe if you paste them into the wrong tool</li>
+              <li>Making high stakes decisions for you</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="privacy">
+      <div class="card">
+        <h2>Personal Privacy Traffic Light</h2>
+        <p class="muted">
+          These are the rules for personal and consumer AI tools. Do not assume your personal chats are private by
+          default. Settings differ by vendor and plan. If you would be upset to see it leaked, treat it carefully.
+        </p>
+        <div class="traffic-layout">
+          <div>
+            <svg class="traffic-light" viewBox="0 0 120 280" role="img" aria-label="Traffic light">
+              <rect x="18" y="12" width="84" height="230" rx="22" fill="#0f172a" stroke="rgba(255,255,255,0.15)"></rect>
+              <circle cx="60" cy="62" r="26" fill="#ef4444"></circle>
+              <circle cx="60" cy="127" r="26" fill="#f59e0b"></circle>
+              <circle cx="60" cy="192" r="26" fill="#22c55e"></circle>
+              <rect x="52" y="246" width="16" height="20" rx="6" fill="#1f2937"></rect>
+            </svg>
+          </div>
+          <div class="grid-3">
+            <div class="traffic-col">
+              <div class="traffic-title"><span class="traffic-dot red"></span>Red</div>
+              <ul>
+                <li>Passwords, private keys, recovery codes, or private links</li>
+                <li>Personal identifiers</li>
+                <li>Medical or legal details you have not anonymized</li>
+                <li>Financial account numbers or full payment details</li>
+                <li>Home address, phone number, or full legal name plus birthdate</li>
+              </ul>
+            </div>
+            <div class="traffic-col">
+              <div class="traffic-title"><span class="traffic-dot yellow"></span>Yellow</div>
+              <ul>
+                <li>Private family, health, or legal notes</li>
+                <li>Anything that would hurt if it leaked</li>
+                <li>Private photos or sensitive personal messages</li>
+                <li>Non-public business or client information</li>
+                <li>Drafts you would not want retained or reused</li>
+              </ul>
+            </div>
+            <div class="traffic-col">
+              <div class="traffic-title"><span class="traffic-dot green"></span>Green</div>
+              <ul>
+                <li>Public information</li>
+                <li>Your own general notes</li>
+                <li>Content you would post publicly</li>
+                <li>General questions without identifying details</li>
+                <li>Anonymized examples you would be willing to share on the internet</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="work-privacy">
+      <div class="card">
+        <h2>Work Privacy Traffic Light</h2>
+        <p class="muted">What if we use a paid version at work?</p>
+        <p class="muted">
+          Use these guidelines only if your company plan keeps chats private, has the right admin settings, and says
+          your data is not used to train or improve the model by default for that work plan.
+        </p>
+        <div class="note-box">
+          <strong>How to confirm:</strong> check your company AI policy, ask IT or Legal, and verify the exact product
+          tier. Consumer, team, business, and enterprise plans often have different privacy rules.
+        </div>
+        <p class="muted">See <a href="#vendor-differences">Vendor Differences with Data Privacy</a> for a plain-English comparison.</p>
+        <div class="traffic-layout">
+          <div>
+            <svg class="traffic-light" viewBox="0 0 120 280" role="img" aria-label="Traffic light">
+              <rect x="18" y="12" width="84" height="230" rx="22" fill="#0f172a" stroke="rgba(255,255,255,0.15)"></rect>
+              <circle cx="60" cy="62" r="26" fill="#ef4444"></circle>
+              <circle cx="60" cy="127" r="26" fill="#f59e0b"></circle>
+              <circle cx="60" cy="192" r="26" fill="#22c55e"></circle>
+              <rect x="52" y="246" width="16" height="20" rx="6" fill="#1f2937"></rect>
+            </svg>
+          </div>
+          <div class="grid-3">
+            <div class="traffic-col">
+              <div class="traffic-title"><span class="traffic-dot red"></span>Red</div>
+              <ul>
+                <li>Passwords, API keys, or access codes</li>
+                <li>Full card numbers or bank account numbers</li>
+                <li>Government ID numbers or full medical records</li>
+                <li>Anything you are legally required to keep private</li>
+              </ul>
+            </div>
+            <div class="traffic-col">
+              <div class="traffic-title"><span class="traffic-dot yellow"></span>Yellow</div>
+              <ul>
+                <li>Internal roadmaps, budgets, or pricing drafts</li>
+                <li>Contracts, employee notes, or customer details</li>
+                <li>Incident reports without credentials</li>
+                <li>Anything that needs legal or policy review before sharing</li>
+              </ul>
+            </div>
+            <div class="traffic-col">
+              <div class="traffic-title"><span class="traffic-dot green"></span>Green</div>
+              <ul>
+                <li>Internal how-to docs and process notes</li>
+                <li>Code snippets without secrets</li>
+                <li>Meeting summaries with identifying details removed</li>
+                <li>Approved content such as blog drafts or job listings</li>
+                <li>General work questions without personal or confidential details</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="vendor-differences">
+      <div class="card">
+        <h2>Vendor Differences with Data Privacy</h2>
+        <p class="muted">
+          Rules change often. This table is a plain-English summary checked on 2026-03-12 so you know what to verify
+          before you paste work information.
+        </p>
+        <p class="muted">Paid work plans usually fall into a few buckets:</p>
+        <ul>
+          <li><strong>Individual paid plans:</strong> more features and sometimes a switch to stop chats from being used for training, but retention and controls may still be limited.</li>
+          <li><strong>Team or business plans:</strong> more admin controls and clearer defaults; training is often off by default.</li>
+          <li><strong>Enterprise plans:</strong> the strictest controls, better governance, and usually contractual terms.</li>
+        </ul>
+        <div class="note-box">
+          <strong>Practical rule:</strong> do not trust the brand name alone. Check the exact product, the admin settings,
+          and whether the promise applies to consumer, business, or API use.
+        </div>
+        <div class="table-wrap">
+          <table class="vendor-table">
+            <thead>
+              <tr>
+                <th>Plan type</th>
+                <th>OpenAI</th>
+                <th>Anthropic</th>
+                <th>Google</th>
+                <th>Microsoft</th>
+                <th>Perplexity</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Free or personal plans</th>
+                <td>Consumer ChatGPT can use chats for training unless the user changes data controls. Temporary Chat is excluded from training.</td>
+                <td>Consumer Claude settings differ by plan and permission; Anthropic changed consumer training policy on 2025-09-28.</td>
+                <td>Personal Gemini behavior depends on product and settings. Do not assume consumer prompts are excluded from training.</td>
+                <td>Consumer Copilot is separate from Microsoft 365 Copilot and does not carry the same work protections.</td>
+                <td>Personal plans should be treated as consumer tools. Do not assume prompts are excluded from training.</td>
+              </tr>
+              <tr>
+                <th scope="row">Paid work plans</th>
+                <td>Business and API data is not used for training by default.</td>
+                <td>Commercial products are not used for training by default.</td>
+                <td>Workspace data is not used to train underlying models without permission.</td>
+                <td>Microsoft 365 Copilot says enterprise prompts and responses are protected under enterprise data protection and not used to train foundation models.</td>
+                <td>Enterprise says business data is not used to train or fine-tune models.</td>
+              </tr>
+              <tr>
+                <th scope="row">What to check</th>
+                <td>Data controls, Temporary Chat, admin settings, and retention.</td>
+                <td>Consumer vs commercial product terms, privacy settings, and retention.</td>
+                <td>Whether you are in Gemini consumer or Workspace, plus admin controls.</td>
+                <td>Whether you are in consumer Copilot or Microsoft 365 Copilot, and how web grounding is handled.</td>
+                <td>Whether you are on enterprise, retention policy, and admin controls.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="rules">
+      <div class="card">
+        <h2>The Boss Rules</h2>
+        <p class="muted">
+          You are the boss of the LLM. The better boss you are, the better responses you will get.
+          These are practical prompt rules for beginners and improving users.
+        </p>
+
+        <article class="rule-card" id="rule-1">
+          <div class="rule-head">
+            <div class="rule-num">1</div>
+            <div class="rule-meta">
+              <h3>Role, Goal, and Structure</h3>
+              <p class="muted">If you do not tell it who it is and what success looks like, it will guess.</p>
+            </div>
+          </div>
+          <div class="code-card">
+            <div class="code-head">
+              <div class="code-label">Boss add on (copy and paste)</div>
+              <button class="copy-btn" type="button" onclick="copyToClipboard('code-rule-1', this)">Copy</button>
+            </div>
+            <pre><code id="code-rule-1">Role: [ROLE]
+Goal: [GOAL]
+Output format: [FORMAT]
+Constraints: [CONSTRAINTS]
+Ask me questions if anything is missing.</code></pre>
+          </div>
+        </article>
+
+        <article class="rule-card" id="rule-2">
+          <div class="rule-head">
+            <div class="rule-num">2</div>
+            <div class="rule-meta">
+              <h3>More Words Are Still Fine</h3>
+              <p class="muted">
+                AI still benefits from context. It is okay to ramble. Stream of consciousness can help.
+                More context is usually better than missing context. Structure just makes it easier to use.
+              </p>
+            </div>
+          </div>
+          <div class="code-card">
+            <div class="code-head">
+              <div class="code-label">Boss add on (copy and paste)</div>
+              <button class="copy-btn" type="button" onclick="copyToClipboard('code-rule-2', this)">Copy</button>
+            </div>
+            <pre><code id="code-rule-2">Context:
+- Background: [WHAT IS GOING ON]
+- Audience: [WHO THIS IS FOR]
+- What good looks like: [EXAMPLE OR CRITERIA]
+- What to avoid: [LIST]
+
+It is okay if my context is a little messy.
+Use it to understand what I really mean.</code></pre>
+          </div>
+        </article>
+
+        <article class="rule-card" id="rule-3">
+          <div class="rule-head">
+            <div class="rule-num">3</div>
+            <div class="rule-meta">
+              <h3>Clarity Over Cleverness</h3>
+              <p class="muted">Tell it to ask questions instead of filling gaps with confident nonsense.</p>
+            </div>
+          </div>
+          <div class="code-card">
+            <div class="code-head">
+              <div class="code-label">Boss add on (copy and paste)</div>
+              <button class="copy-btn" type="button" onclick="copyToClipboard('code-rule-3', this)">Copy</button>
+            </div>
+            <pre><code id="code-rule-3">Do not make things up.
+
+Before you answer, ask me the questions you need.
+Do this before you draft anything.
+
+Focus on:
+- the goal
+- the audience
+- the constraints
+- any missing data
+
+Ask your questions as a numbered list. Then wait.</code></pre>
+          </div>
+        </article>
+
+        <article class="rule-card" id="rule-4">
+          <div class="rule-head">
+            <div class="rule-num">4</div>
+            <div class="rule-meta">
+              <h3>Work in Rounds, Not Magic Phrases</h3>
+              <p class="muted">
+                Do not rely on "think step by step" like it is a universal cheat code.
+                For harder tasks, make the AI work in stages.
+              </p>
+            </div>
+          </div>
+          <div class="code-card">
+            <div class="code-head">
+              <div class="code-label">Boss add on (copy and paste)</div>
+              <button class="copy-btn" type="button" onclick="copyToClipboard('code-rule-4', this)">Copy</button>
+            </div>
+            <pre><code id="code-rule-4">Take your time.
+
+Accuracy matters more than speed.
+Work in rounds:
+1. Clarify the task.
+2. Draft an answer.
+3. Critique the draft.
+4. Revise the answer.
+
+Surface any assumptions, uncertainty, or missing information.
+If anything is unclear, ask me questions first.</code></pre>
+          </div>
+        </article>
+
+        <article class="rule-card" id="rule-5">
+          <div class="rule-head">
+            <div class="rule-num">5</div>
+            <div class="rule-meta">
+              <h3>Coach the Process, Not Just the Output</h3>
+              <p class="muted">For complex work, run a sequence. One job at a time.</p>
+            </div>
+          </div>
+          <div class="code-card">
+            <div class="code-head">
+              <div class="code-label">Boss add on (copy and paste)</div>
+              <button class="copy-btn" type="button" onclick="copyToClipboard('code-rule-5', this)">Copy</button>
+            </div>
+            <pre><code id="code-rule-5">We are going to do this in rounds.
+
+Round 1: Ask clarifying questions (max 7).
+Round 2: Propose 2 to 3 approaches and recommend one.
+Round 3: Draft the output.
+Round 4: Critique your draft against the goal and constraints.
+Round 5: Produce the improved version.</code></pre>
+          </div>
+        </article>
+
+        <article class="rule-card" id="rule-6">
+          <div class="rule-head">
+            <div class="rule-num">6</div>
+            <div class="rule-meta">
+              <h3>Iteration Beats Perfection</h3>
+              <p class="muted">Treat the first draft like clay. Shape it. Then shape it again.</p>
+            </div>
+          </div>
+          <div class="code-card">
+            <div class="code-head">
+              <div class="code-label">Boss add on (copy and paste)</div>
+              <button class="copy-btn" type="button" onclick="copyToClipboard('code-rule-6', this)">Copy</button>
+            </div>
+            <pre><code id="code-rule-6">Draft the output.
+
+Then critique it against:
+- the goal
+- the constraints
+- what is missing
+- what is unclear
+
+Then produce an improved version.</code></pre>
+          </div>
+        </article>
+
+        <article class="rule-card" id="rule-7">
+          <div class="rule-head">
+            <div class="rule-num">7</div>
+            <div class="rule-meta">
+              <h3>Ask for Suggestions and Several Versions</h3>
+              <p class="muted">The first idea is rarely the best idea. Make it generate options.</p>
+            </div>
+          </div>
+          <div class="code-card">
+            <div class="code-head">
+              <div class="code-label">Boss add on (copy and paste)</div>
+              <button class="copy-btn" type="button" onclick="copyToClipboard('code-rule-7', this)">Copy</button>
+            </div>
+            <pre><code id="code-rule-7">Give me options.
+
+Generate 10 ideas.
+Pick the best 3.
+Explain why they win.
+Then ask me which direction to take.</code></pre>
+          </div>
+        </article>
+
+        <article class="rule-card" id="rule-8">
+          <div class="rule-head">
+            <div class="rule-num">8</div>
+            <div class="rule-meta">
+              <h3>Teach It to Sound Like You</h3>
+              <p class="muted">Most AI writing is easy to spot. Train it on your voice and your rules.</p>
+            </div>
+          </div>
+          <div class="code-card">
+            <div class="code-head">
+              <div class="code-label">Boss add on (copy and paste)</div>
+              <button class="copy-btn" type="button" onclick="copyToClipboard('code-rule-8', this)">Copy</button>
+            </div>
+            <pre><code id="code-rule-8">You are my writing assistant.
+
+Goal: write in my voice.
+
+Here are 3 to 5 writing samples (paste them below):
+[SAMPLE 1]
+[SAMPLE 2]
+[SAMPLE 3]
+
+First, extract a voice guide with:
+- sentence length and rhythm
+- typical phrases I use
+- what I avoid
+- how I open, transition, and close
+
+Do not use emojis, hyphenated sentences, or other clear "AI-written" tells.
+I want this to sound like I wrote it and I do not use those things.
+
+Then write [THING] in that voice.
+If you are unsure, ask me questions.</code></pre>
+          </div>
+        </article>
+
+        <article class="rule-card" id="rule-9">
+          <div class="rule-head">
+            <div class="rule-num">9</div>
+            <div class="rule-meta">
+              <h3>What If I Am Not Getting What I Want?</h3>
+              <p class="muted">If the output is mush, your prompt might be the problem. Fix the prompt first.</p>
+            </div>
+          </div>
+          <div class="code-card">
+            <div class="code-head">
+              <div class="code-label">Boss add on (copy and paste)</div>
+              <button class="copy-btn" type="button" onclick="copyToClipboard('code-rule-9', this)">Copy</button>
+            </div>
+            <pre><code id="code-rule-9">Before you answer, do this:
+
+1) List any contradictions in my instructions.
+2) List what is missing.
+3) Rewrite my prompt to be tighter and clearer.
+4) Ask me the questions you still need.
+
+Then wait.</code></pre>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="templates">
+      <div class="card">
+        <h2>Prompt Templates</h2>
+        <p class="muted">Pick a template. Fill in the brackets. Run it. Then improve it using the boss rules above.</p>
+        <div class="note-box">
+          <strong>Important:</strong> longer prompts are still fine. Rambling context is often useful. Stream of consciousness can help.
+          Structure just makes that context easier for the model to use.
+        </div>
+        <div class="note-box">
+          <strong>Universal add on:</strong> before you answer, ask what is missing, list your assumptions, use current sources when the facts may have changed, and clearly label anything you cannot verify.
+        </div>
+        <div class="chips" id="templateChips">
+          <a class="chip" href="#boss-prompt">Template 0: The Boss Prompt</a>
+          <a class="chip" href="#persona">Template 1: Persona and Expertise</a>
+          <a class="chip" href="#expert-panel">Template 2: Expert Panel</a>
+          <a class="chip" href="#fact-checker">Template 3: The Fact Checker</a>
+          <a class="chip" href="#procedural">Template 4: The Procedural Framework</a>
+          <a class="chip" href="#government">Template 5: Navigating a Government System</a>
+          <a class="chip" href="#test-prep">Template 6: Test and Interview Prep</a>
+          <a class="chip" href="#templated-output">Template 7: Specific Templatized Output</a>
+          <a class="chip" href="#research">Template 8: Research with Sources</a>
+          <a class="chip" href="#document-review">Template 9: Document or PDF Review</a>
+          <a class="chip" href="#image-review">Template 10: Screenshot or Image Analysis</a>
+          <a class="chip" href="#compare-sources">Template 11: Compare Sources</a>
+          <a class="chip" href="#structured-output">Template 12: Structured JSON or Table</a>
+        </div>
+
+        <div id="templateCards">
+          <article class="template-card" id="boss-prompt">
+            <div class="template-head">
+              <h3>Template 0: The Boss Prompt</h3>
+              <p class="muted">Use this when you do not know where to start. It is the safest default template for most tasks.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-boss-prompt-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-boss-prompt-template">You are my assistant.
+
+Role: [ROLE]
+Goal: [GOAL]
+
+Context:
+[PASTE CONTEXT]
+
+Output:
+- Format: [FORMAT]
+- Length: [LENGTH]
+- Tone: [TONE]
+
+Rules:
+- If anything important is missing, ask me up to 7 questions before you answer.
+- List the assumptions you are making.
+- If you are unsure, say so. Do not make things up.
+- Use plain English.
+- When useful, give me 2 to 3 options and recommend one.
+- If this depends on current facts, use current sources, link them, and include the date checked.
+- If this would be better with a file, screenshot, or document, ask me for it.
+
+Start by asking your questions. Then wait.</code></pre>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Optional add on 1 (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-boss-prompt-extra-1', this)">Copy</button>
+              </div>
+              <pre><code id="code-boss-prompt-extra-1">Before you answer, do this:
+
+1. List any contradictions in my instructions.
+2. List what is missing.
+3. Rewrite my prompt to be tighter and clearer.
+4. Ask me the questions you still need.
+
+Then wait.</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="persona">
+            <div class="template-head">
+              <h3>Template 1: Persona and Expertise</h3>
+              <p class="muted">Use this to set tone, depth, and perspective without pretending the model is magically authoritative.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-persona-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-persona-template">Respond from the perspective of a [primary role] with expertise in:
+- [Specific qualification]
+- [Specific experience]
+- [Specific specialty]
+
+What this role typically cares about:
+- [Priority 1]
+- [Priority 2]
+
+Task: [specific task or question]
+
+Instructions:
+- Use the perspective, tradeoffs, and priorities of this role.
+- Do not invent credentials, facts, or hidden knowledge.
+- If experts in this role would disagree, say where they would disagree.
+- If anything important is missing, ask me questions first.
+
+Output:
+- Terminology level: [professional | accessible]
+- Tone: [tone]
+- Format: [format]</code></pre>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Example 1 (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-persona-example-1', this)">Copy</button>
+              </div>
+              <pre><code id="code-persona-example-1">Respond from the perspective of a clear, practical communication coach with expertise in writing firm but respectful emails.
+
+What this role typically cares about:
+- clarity
+- respect
+- getting to the point
+
+Task: Write an email to my landlord about a leaking ceiling that needs repair.
+
+Instructions:
+- Use short sentences and plain English.
+- Do not use hype.
+- If anything important is missing, ask me questions first.
+
+Output:
+- Terminology level: accessible
+- Tone: confident and respectful
+- Format: subject line + email body + 3 alternate subject lines</code></pre>
+            </div>
+            <div class="code-card compact">
+              <div class="code-head">
+                <div class="code-label">Optional add on 1 (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-persona-extra-1', this)">Copy</button>
+              </div>
+              <pre><code id="code-persona-extra-1">Give me 3 versions.
+Explain what each version optimizes for.
+Recommend one and tell me why.</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="expert-panel">
+            <div class="template-head">
+              <h3>Template 2: Expert Panel</h3>
+              <p class="muted">Use this when you want multiple perspectives, disagreement, and synthesis. Treat it as simulated viewpoints, not a substitute for real experts.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-expert-panel-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-expert-panel-template">Give me multiple expert perspectives on [problem].
+
+Simulate a panel discussion with the following roles:
+- Expert 1: [Specific role] with expertise in [domain]
+- Expert 2: [Specific role] with expertise in [domain]
+- Expert 3: [Specific role] with expertise in [domain]
+
+Instructions:
+- Base each perspective on common real world priorities for that role.
+- Do not invent facts.
+- If the answer depends on current facts, use sources and link them.
+
+For each expert:
+- State their perspective and priorities
+- Analyze the problem from that viewpoint
+- Propose a solution
+
+Then provide:
+- Where they agree
+- Where they disagree
+- What is uncertain
+- A recommended path forward
+
+Format as:
+Expert 1:
+[response]</code></pre>
+            </div>
+            <div class="code-card compact">
+              <div class="code-head">
+                <div class="code-label">Optional add on 1 (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-expert-panel-extra-1', this)">Copy</button>
+              </div>
+              <pre><code id="code-expert-panel-extra-1">Work in rounds:
+1. Clarify the problem.
+2. Draft each viewpoint.
+3. Summarize agreement, disagreement, and uncertainty.
+4. Revise the recommendation.</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="fact-checker">
+            <div class="template-head">
+              <h3>Template 3: The Fact Checker</h3>
+              <p class="muted">Use this when accuracy matters. It forces the model to verify instead of just sounding correct.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-fact-checker-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-fact-checker-template">You are a tireless researcher and fact checker.
+
+Fact check the text below.
+Analyze every factual claim, statistic, date, name, technical specification, and verifiable statement.
+
+Use current sources when needed.
+
+For each important claim, return:
+- Claim
+- Status: Verified / Unverified / Contradicted
+- Source link
+- Date checked
+- Short note
+
+Then include:
+- Claims that still need verification
+- Vague or misleading statements
+- Internal contradictions
+- What is confirmed vs inferred
+- Overall risk level: low / medium / high
+
+If you cannot verify something, label it Unverified.
+Do not guess.
+
+Text to fact check:
+[PASTE YOUR TEXT HERE]</code></pre>
+            </div>
+            <div class="code-card compact">
+              <div class="code-head">
+                <div class="code-label">Optional add on 1 (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-fact-checker-extra-1', this)">Copy</button>
+              </div>
+              <pre><code id="code-fact-checker-extra-1">Use sources I can click.
+Prefer primary sources when possible.
+If source quality matters, ask me what sources I trust.</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="procedural">
+            <div class="template-head">
+              <h3>Template 4: The Procedural Framework</h3>
+              <p class="muted">Use this to get a repeatable process, not just advice.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-procedural-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-procedural-template">You are an expert in [domain] and an experienced teacher.
+
+Create a step by step guide to accomplish [specific goal].
+
+Instructions:
+- If laws, policies, software, pricing, or product details may have changed, verify current information first.
+- Ask questions if anything important is missing.
+- Use plain language unless I ask for technical detail.
+
+Structure your response as:
+
+Requirements:
+[what is needed]
+
+Preparation:
+[setup steps]
+
+Instructions:
+[step by step actions]
+
+Troubleshooting:
+[common issues and fixes]
+
+Variations:
+[alternate approaches]
+
+Goal:
+[specific objective]</code></pre>
+            </div>
+            <div class="code-card compact">
+              <div class="code-head">
+                <div class="code-label">Optional add on 1 (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-procedural-extra-1', this)">Copy</button>
+              </div>
+              <pre><code id="code-procedural-extra-1">We are going to do this in rounds.
+
+Round 1: Ask clarifying questions.
+Round 2: Propose 2 approaches and recommend one.
+Round 3: Draft the steps.
+Round 4: Critique the steps for gaps and risk.
+Round 5: Produce the improved version.</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="government">
+            <div class="template-head">
+              <h3>Template 5: Navigating a Government System</h3>
+              <p class="muted">Use this to turn bureaucratic confusion into practical steps and known pitfalls.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-government-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-government-template">You are an expert at government processes and navigating bureaucracy.
+
+I need help with: [what you are trying to do]
+
+Use current official sources and link them.
+Prefer official agency websites.
+Tell me which parts vary by jurisdiction.
+If anything important is missing, ask me questions first.
+
+My details:
+- Who I am: [details]
+- Goal: [goal]
+- Agency or system: [if known]
+- Jurisdiction: [country / state / city / institution]
+- Current status: [what I have done]
+- Constraints: [deadlines, missing documents, budget, legal issues]
+- Dates and deadlines: [known dates]
+- Special factors: [anything unusual]
+
+What I want:
+1. A simple overview of how the system works
+2. A numbered action plan for my situation
+3. Required forms, documents, IDs, and evidence
+4. Expected fees
+5. Decision points and bottlenecks
+6. Common mistakes and how to avoid them
+7. A realistic timeline
+8. Questions the agency is likely to ask me
+9. A script for calling or emailing the agency
+10. A backup plan if the main path stalls</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="test-prep">
+            <div class="template-head">
+              <h3>Template 6: Test and Interview Prep</h3>
+              <p class="muted">Use this when you want practice, feedback, and increasing difficulty.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-test-prep-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-test-prep-template">You are an experienced teacher, coach, and interviewer in [field].
+
+Help me prepare for [role / exam / conversation / topic].
+
+Do the following:
+1. Ask me for the relevant materials first.
+2. Review the materials and identify focus areas.
+3. Create a structured practice session with questions of varying difficulty.
+4. After each answer, score me briefly on:
+   - clarity
+   - completeness
+   - credibility
+5. Tell me whether I should expand, clarify, or move on.
+6. End with a summary of strengths and the top improvements I should make.
+
+Start by asking for my materials.</code></pre>
+            </div>
+            <div class="code-card compact">
+              <div class="code-head">
+                <div class="code-label">Optional add on 1 (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-test-prep-extra-1', this)">Copy</button>
+              </div>
+              <pre><code id="code-test-prep-extra-1">Work in rounds:
+1. Ask for the materials.
+2. Build the practice plan.
+3. Critique the plan for missing difficulty levels.
+4. Improve it.</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="templated-output">
+            <div class="template-head">
+              <h3>Template 7: Specific Templatized Output</h3>
+              <p class="muted">Use this when you need output in a strict format every time.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-templated-output-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-templated-output-template">You are excellent at following directions.
+
+I am giving you a strict output template with [PLACEHOLDERS].
+
+Rules:
+- Output must match the template exactly.
+- Do not add extra sections.
+- Do not invent facts.
+- If a field is missing, either ask me for it or mark it as [MISSING].
+
+Template:
+[PASTE TEMPLATE HERE]
+
+Apply this template to:
+[YOUR REQUEST]</code></pre>
+            </div>
+            <div class="code-card compact">
+              <div class="code-head">
+                <div class="code-label">Optional add on 1 (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-templated-output-extra-1', this)">Copy</button>
+              </div>
+              <pre><code id="code-templated-output-extra-1">If the template and my instructions conflict, stop and ask me which one should win.</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="research">
+            <div class="template-head">
+              <h3>Template 8: Research with Sources</h3>
+              <p class="muted">Use this when you need current, source-backed answers instead of generic explanations.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-research-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-research-template">Research this topic using current sources:
+[TOPIC]
+
+Instructions:
+- Use current sources.
+- Link each major claim.
+- Include the date checked.
+- Separate what is confirmed from what is inferred.
+- If sources conflict, say so.
+- If you cannot verify something, label it Unverified.
+
+Output:
+1. Short answer
+2. Key findings with source links
+3. What is confirmed
+4. What is inferred
+5. Open questions or uncertainty</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="document-review">
+            <div class="template-head">
+              <h3>Template 9: Document or PDF Review</h3>
+              <p class="muted">Use this when you are uploading a file and want the model to stay grounded in that file.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-document-review-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-document-review-template">I am uploading a document or PDF.
+
+First:
+1. Summarize what the document is.
+2. List any ambiguities, missing pages, or unreadable parts.
+
+Then do this task:
+[TASK]
+
+Rules:
+- Answer from the document first.
+- If you use outside knowledge, label it clearly.
+- Quote or cite the part of the document you are relying on when possible.
+- If the file is not enough to answer fully, tell me what is missing.</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="image-review">
+            <div class="template-head">
+              <h3>Template 10: Screenshot or Image Analysis</h3>
+              <p class="muted">Use this for screenshots, photos, dashboards, UI bugs, and visual analysis.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-image-review-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-image-review-template">I am uploading an image or screenshot.
+
+First:
+1. Describe exactly what you see.
+2. List any ambiguities or things you cannot read clearly.
+
+Then do this task:
+[TASK]
+
+Rules:
+- Separate observation from interpretation.
+- If text is visible, extract the text first.
+- If you are inferring something, label it as inference.
+- If the image alone is not enough, tell me what else you need.</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="compare-sources">
+            <div class="template-head">
+              <h3>Template 11: Compare Sources and Resolve Conflicts</h3>
+              <p class="muted">Use this when different articles, documents, or vendors disagree.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-compare-sources-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-compare-sources-template">Compare these sources on:
+[TOPIC]
+
+Sources:
+- [SOURCE 1]
+- [SOURCE 2]
+- [SOURCE 3]
+
+Output:
+1. What all sources agree on
+2. Where they conflict
+3. Which source appears strongest and why
+4. What is still uncertain
+5. Your best current conclusion
+
+Rules:
+- Link the sources.
+- Prefer primary or official sources when possible.
+- Separate evidence from interpretation.</code></pre>
+            </div>
+          </article>
+
+          <article class="template-card" id="structured-output">
+            <div class="template-head">
+              <h3>Template 12: Structured JSON or Table</h3>
+              <p class="muted">Use this when you want data you can paste into a spreadsheet, script, or workflow.</p>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Starting template (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-structured-output-template', this)">Copy</button>
+              </div>
+              <pre><code id="code-structured-output-template">Return the answer in [JSON | table] format.
+
+Schema or columns:
+- [FIELD 1]
+- [FIELD 2]
+- [FIELD 3]
+
+Rules:
+- Use null for unknown values.
+- Do not invent missing values.
+- If the schema is unclear, ask me questions first.
+- Keep all field names exact.
+
+Task:
+[YOUR REQUEST]</code></pre>
+            </div>
+            <div class="code-card">
+              <div class="code-head">
+                <div class="code-label">Example 1 (copy and paste)</div>
+                <button class="copy-btn" type="button" onclick="copyToClipboard('code-structured-output-example-1', this)">Copy</button>
+              </div>
+              <pre><code id="code-structured-output-example-1">Return the answer in JSON format.
+
+Schema:
+- company_name
+- product_name
+- category
+- target_customer
+- pricing_notes
+- source_url
+- confidence
+
+Rules:
+- Use null for unknown values.
+- Do not invent missing values.
+- Keep all field names exact.
+
+Task:
+Research the top embedded DevOps tools vendors and return the results in this schema.</code></pre>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="followups">
+      <div class="card">
+        <h2>Follow Up Moves That Fix Almost Anything</h2>
+        <p class="muted">Most people stop after one prompt. That is why they get mediocre output.</p>
+        <div class="code-card">
+          <div class="code-head">
+            <div class="code-label">Follow ups (copy and paste)</div>
+            <button class="copy-btn" type="button" onclick="copyToClipboard('code-followups', this)">Copy</button>
+          </div>
+          <pre><code id="code-followups">Make it shorter:
+Make this 40% shorter. Keep the meaning. Keep the tone.
+
+Make it clearer:
+Rewrite this for a smart 12 year old. Keep it accurate.
+
+Make it punchier:
+Rewrite this to be more direct and confident. No hype.
+
+Give options:
+Give me 3 versions: safe, bold, and weird.
+
+Show your assumptions:
+List the assumptions you made. Then ask me what is wrong.
+
+Turn it into a checklist:
+Convert this into a checklist I can follow.
+
+Ground it in current sources:
+If this depends on current facts, use current sources, link them, and tell me the date checked.
+
+Critique it:
+Critique your own output. What is missing. What is unclear. Then fix it.</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="footer">
+      <div class="card">
+        <h2>Final Note</h2>
+        <p class="muted">Save your best prompts. Build your own library. The compounding is real.</p>
+        <p class="muted">If you want the AI to act like a professional, you have to manage it like one.</p>
+        <p class="muted"><a href="https://johnmaconline.com/">johnmaconline.com</a></p>
+      </div>
+    </section>
+  </main>
+
+  <button class="float-top" type="button" onclick="document.getElementById('top').scrollIntoView({behavior:'smooth'})">Top</button>
+
+  <script>
+    async function copyToClipboard(codeId, btn) {
+      const el = document.getElementById(codeId);
+      if (!el) return;
+      const text = el.innerText;
+
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.classList.add('copied');
+        const old = btn.innerText;
+        btn.innerText = 'Copied';
+        setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerText = old;
+        }, 1200);
+      } catch (_err) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        btn.classList.add('copied');
+        const old = btn.innerText;
+        btn.innerText = 'Copied';
+        setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerText = old;
+        }, 1200);
+      }
+    }
+  </script>
+</body>
+</html>

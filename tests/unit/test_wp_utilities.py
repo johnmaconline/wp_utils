@@ -26,6 +26,25 @@ def test_build_wp_api_posts_url_variants():
         == "https://example.com/wp-json/wp/v2/posts"
     )
 
+
+def test_build_wp_api_pages_url_variants():
+    assert (
+        wp_utilities.build_wp_api_pages_url("https://example.com")
+        == "https://example.com/wp-json/wp/v2/pages"
+    )
+    assert (
+        wp_utilities.build_wp_api_pages_url("https://example.com/wp-json")
+        == "https://example.com/wp-json/wp/v2/pages"
+    )
+    assert (
+        wp_utilities.build_wp_api_pages_url("https://example.com/wp-json/wp/v2")
+        == "https://example.com/wp-json/wp/v2/pages"
+    )
+    assert (
+        wp_utilities.build_wp_api_pages_url("https://example.com/wp-json/wp/v2/pages")
+        == "https://example.com/wp-json/wp/v2/pages"
+    )
+
 def test_build_wp_api_base_and_plugins_url():
     assert wp_utilities.build_wp_api_base("https://example.com") == "https://example.com"
     assert (
@@ -311,6 +330,115 @@ def test_backfill_post_navigation_specific_post_id(monkeypatch):
     assert "<p>First para</p>" in captured["json"]["content"]
     assert stats["processed"] == 1
     assert stats["needs_update"] == 1
+
+
+def test_update_page_wp_api_dry_run(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_page_edit",
+        lambda *_args, **_kwargs: {
+            "id": 55217,
+            "status": "publish",
+            "link": "https://example.com/how-to-talk-to-ai/",
+            "title": {"rendered": "How to Talk to AI"},
+            "content": {"raw": "<p>old</p>"},
+        },
+    )
+
+    row = wp_utilities.update_page_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        55217,
+        "<p>new</p>",
+        dry_run=True,
+    )
+
+    assert row["operation"] == "update-page"
+    assert row["id"] == 55217
+    assert row["action"] == "would-update"
+    assert row["content_changed"] == "True"
+    assert row["dry_run"] == "True"
+
+
+def test_prepare_wp_page_content_wraps_html_block():
+    wrapped = wp_utilities.prepare_wp_page_content("<div>hello</div>")
+    assert wrapped.startswith("<!-- wp:html -->")
+    assert "<div>hello</div>" in wrapped
+    assert wrapped.endswith("<!-- /wp:html -->")
+
+
+def test_update_page_wp_api_skips_when_unchanged(monkeypatch):
+    prepared = wp_utilities.prepare_wp_page_content("<p>same</p>")
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_page_edit",
+        lambda *_args, **_kwargs: {
+            "id": 55217,
+            "status": "publish",
+            "link": "https://example.com/how-to-talk-to-ai/",
+            "title": {"rendered": "How to Talk to AI"},
+            "content": {"raw": prepared},
+        },
+    )
+
+    row = wp_utilities.update_page_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        55217,
+        "<p>same</p>",
+        dry_run=False,
+    )
+
+    assert row["action"] == "skipped-no-change"
+    assert row["content_changed"] == "False"
+
+
+def test_update_page_wp_api_updates_page(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_page_edit",
+        lambda *_args, **_kwargs: {
+            "id": 55217,
+            "status": "publish",
+            "link": "https://example.com/how-to-talk-to-ai/",
+            "title": {"rendered": "How to Talk to AI"},
+            "content": {"raw": "<p>old</p>"},
+        },
+    )
+
+    captured = {}
+
+    class DummyResponse:
+        status_code = 200
+        text = "ok"
+
+        @staticmethod
+        def json():
+            return {
+                "id": 55217,
+                "status": "publish",
+                "link": "https://example.com/how-to-talk-to-ai/",
+            }
+
+    def fake_post(url, headers=None, json=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        return DummyResponse()
+
+    monkeypatch.setattr(wp_utilities.requests, "post", fake_post)
+
+    row = wp_utilities.update_page_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        55217,
+        "<p>new</p>",
+        dry_run=False,
+    )
+
+    assert row["action"] == "updated"
+    assert captured["url"] == "https://example.com/wp-json/wp/v2/pages/55217"
+    assert captured["json"] == {"content": wp_utilities.prepare_wp_page_content("<p>new</p>")}
 
 
 def test_sanitize_filename():
