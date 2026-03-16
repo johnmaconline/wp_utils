@@ -1536,7 +1536,10 @@ def backfill_post_navigation(
             rows.append(row)
             skipped += 1
             continue
-        if has_post_navigation_blocks(raw_content):
+
+        body, _nav = split_post_navigation_blocks(raw_content)
+        body_format = detect_post_body_format(body)
+        if has_post_navigation_blocks(raw_content) and body_format != 'markdown':
             row['action'] = 'already-has-navigation'
             rows.append(row)
             already += 1
@@ -1698,8 +1701,15 @@ def _confirm_update(existing, slug, force=False):
 
 
 def schedule_post_wp_api(url, headers, content_md, meta, dry_run=False, preview=False, tz_name=DEFAULT_TIMEZONE, force=False, publish_date: Any | None = None):
-    content_md = ensure_post_navigation_blocks(content_md)
-    payload, schedule_dt = build_schedule_payload(url, headers, content_md, meta, tz_name, publish_date=publish_date)
+    normalized_content, _body_format = normalize_post_navigation_content(content_md)
+    payload, schedule_dt = build_schedule_payload(
+        url,
+        headers,
+        normalized_content,
+        meta,
+        tz_name,
+        publish_date=publish_date,
+    )
     existing = find_post_by_slug(url, headers, payload.get('slug', ''))
     if existing:
         if not _confirm_update(existing, payload.get('slug', ''), force=force):
@@ -2085,7 +2095,7 @@ def handle_args():
     parser.add_argument(
         '--backfill-post-navigation',
         action='store_true',
-        help='Append Gutenberg previous/next navigation blocks to existing posts that do not already have them.')
+        help='Normalize existing post bodies to HTML and ensure Gutenberg previous/next navigation blocks are present.')
     parser.add_argument(
         '--update-page',
         action='store_true',
@@ -2326,7 +2336,7 @@ def handle_args():
         if args.force:
             log.info('+  Force enabled (skip update prompts)')
     if args.backfill_post_navigation:
-        log.info('+  Backfilling post navigation blocks via WP API')
+        log.info('+  Normalizing post bodies and backfilling post navigation via WP API')
         log.info(f'+  Target URL: {args.url}')
         if args.post_id is not None:
             log.info(f'+  Post ID: {args.post_id}')

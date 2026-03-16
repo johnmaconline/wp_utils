@@ -119,7 +119,34 @@ def test_ensure_post_navigation_blocks_is_idempotent():
     assert updated == content
 
 
-def test_schedule_post_wp_api_dry_run_adds_navigation_blocks(monkeypatch):
+def test_schedule_post_wp_api_dry_run_renders_markdown_and_adds_navigation_blocks(monkeypatch):
+    monkeypatch.setattr(wp_utilities, "resolve_term_ids", lambda *_args, **_kwargs: [123])
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_latest_scheduled_date",
+        lambda *_args, **_kwargs: datetime.datetime(2026, 1, 27, 8, 44),
+    )
+    monkeypatch.setattr(wp_utilities, "find_post_by_slug", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda text: f"<p>{text}</p>",
+    )
+
+    result = wp_utilities.schedule_post_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "Body copy",
+        {"title": "My Post", "categories": ["AI"], "tags": ["tag-one"]},
+        dry_run=True,
+    )
+
+    assert result["action"] == "create"
+    assert result["payload"]["content"].startswith("<p>Body copy</p>")
+    assert result["payload"]["content"].count("wp:post-navigation-link") == 2
+
+
+def test_schedule_post_wp_api_dry_run_preserves_html(monkeypatch):
     monkeypatch.setattr(wp_utilities, "resolve_term_ids", lambda *_args, **_kwargs: [123])
     monkeypatch.setattr(
         wp_utilities,
@@ -131,13 +158,13 @@ def test_schedule_post_wp_api_dry_run_adds_navigation_blocks(monkeypatch):
     result = wp_utilities.schedule_post_wp_api(
         "https://example.com",
         {"Authorization": "Basic token"},
-        "Body copy",
-        {"title": "My Post", "categories": ["AI"], "tags": ["tag-one"]},
+        "<p>Body copy</p>",
+        {"title": "My Post", "categories": ["AI"]},
         dry_run=True,
     )
 
     assert result["action"] == "create"
-    assert result["payload"]["content"].startswith("Body copy")
+    assert result["payload"]["content"].startswith("<p>Body copy</p>")
     assert result["payload"]["content"].count("wp:post-navigation-link") == 2
 
 
@@ -275,6 +302,64 @@ def test_backfill_post_navigation_updates_post(monkeypatch):
     assert captured["json"]["content"].count("wp:post-navigation-link") == 2
     assert "<p>Hello</p>" in captured["json"]["content"]
     assert "<p>World</p>" in captured["json"]["content"]
+    assert stats["needs_update"] == 1
+
+
+def test_backfill_post_navigation_updates_markdown_body_with_existing_navigation(monkeypatch):
+    posts = [
+        {
+            "id": 4,
+            "status": "publish",
+            "date": "2026-01-30T08:44:00",
+            "link": "https://example.com/four/",
+            "title": {"rendered": "Four"},
+        }
+    ]
+    monkeypatch.setattr(wp_utilities, "fetch_wp_endpoint", lambda *_args, **_kwargs: posts)
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda text: f"<p>{text.replace(chr(10) * 2, '</p><p>')}</p>",
+    )
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_post_edit",
+        lambda *_args, **_kwargs: {
+            "id": 4,
+            "status": "publish",
+            "date": "2026-01-30T08:44:00",
+            "link": "https://example.com/four/",
+            "title": {"rendered": "Four"},
+            "content": {"raw": f"Hello\n\nWorld\n\n{wp_utilities.POST_NAVIGATION_BLOCKS}"},
+        },
+    )
+
+    captured = {}
+
+    class DummyResponse:
+        status_code = 200
+        text = "ok"
+
+    def fake_post(url, headers=None, json=None):
+        captured["url"] = url
+        captured["json"] = json
+        return DummyResponse()
+
+    monkeypatch.setattr(wp_utilities.requests, "post", fake_post)
+
+    rows, stats = wp_utilities.backfill_post_navigation(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        dry_run=False,
+    )
+
+    assert rows[0]["action"] == "updated"
+    assert rows[0]["content_format"] == "markdown"
+    assert captured["url"] == "https://example.com/wp-json/wp/v2/posts/4"
+    assert "<p>Hello</p>" in captured["json"]["content"]
+    assert "<p>World</p>" in captured["json"]["content"]
+    assert captured["json"]["content"].count("wp:post-navigation-link") == 2
+    assert stats["already_has_navigation"] == 0
     assert stats["needs_update"] == 1
 
 
