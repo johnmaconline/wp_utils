@@ -114,6 +114,7 @@ Examples:
   - Tags are optional and resolved by name; missing tags are created automatically.
   - If `slug` is omitted, it is auto-generated from the title (lowercase, words joined by `-`).
   - A leading `# H1` at the top of the markdown is stripped to avoid duplicate titles.
+  - Markdown content is serialized into native Gutenberg blocks for headings, paragraphs, lists, quotes, code blocks, images, separators, and tables. Unsupported raw HTML falls back to a Gutenberg HTML block.
   - Yoast fields supported: `focus_keyphrase`, `meta_description`.
   Metadata JSON format:
   ```json
@@ -293,6 +294,7 @@ Examples:
 
 ### `post.py`
 Schedules a markdown post on WordPress and optionally posts a Twitter/X thread.
+Markdown input is converted into native Gutenberg blocks before posting.
 
 Args:
 - `--file` Path to the markdown file (required)

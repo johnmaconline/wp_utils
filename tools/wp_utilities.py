@@ -12,12 +12,13 @@
 
 import base64
 import requests
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 import argparse
 import logging
 import sys
 import os
 import json
+import html
 import mimetypes
 from datetime import date
 from typing import Any
@@ -1392,13 +1393,236 @@ def ensure_post_navigation_blocks(content: str) -> str:
     return f'{body}\n\n{POST_NAVIGATION_BLOCKS}'
 
 
+def _render_markdown_html(markdown_text: str) -> str:
+    content = markdown_text or ''
+    try:
+        return render_markdown(content, extensions=['fenced_code', 'tables', 'sane_lists', 'nl2br'])
+    except TypeError:
+        return render_markdown(content)
+
+
+def prepare_wp_html_block_content(html_content: str) -> str:
+    content = (html_content or '').strip()
+    if not content:
+        return ''
+    if content.startswith('<!-- wp:'):
+        return content
+    return f'<!-- wp:html -->\n{content}\n<!-- /wp:html -->'
+
+
+def _serialize_gutenberg_block(block_name: str, inner_html: str, attrs: dict[str, Any] | None = None) -> str:
+    attr_part = ''
+    if attrs:
+        attr_part = f" {json.dumps(attrs, separators=(',', ':'))}"
+    return f'<!-- wp:{block_name}{attr_part} -->\n{inner_html}\n<!-- /wp:{block_name} -->'
+
+
+def _ensure_tag_class(tag: Tag, class_name: str) -> None:
+    classes = list(tag.get('class') or [])
+    if class_name not in classes:
+        classes.append(class_name)
+    if classes:
+        tag['class'] = classes
+
+
+def _significant_children(tag: Tag) -> list[Tag | NavigableString]:
+    return [
+        child for child in tag.contents
+        if not (isinstance(child, NavigableString) and not child.strip())
+    ]
+
+
+def _image_markup_from_node(node: Tag) -> str | None:
+    if node.name == 'img':
+        return str(node)
+    if node.name == 'figure' and node.find('img'):
+        _ensure_tag_class(node, 'wp-block-image')
+        return str(node)
+    if node.name == 'p':
+        children = _significant_children(node)
+        if len(children) != 1 or not isinstance(children[0], Tag):
+            return None
+        child = children[0]
+        if child.name == 'img':
+            return str(child)
+        if child.name == 'a':
+            nested = _significant_children(child)
+            if len(nested) == 1 and isinstance(nested[0], Tag) and nested[0].name == 'img':
+                return str(child)
+        return None
+    return None
+
+
+def _convert_html_to_gutenberg_block(node: Tag | NavigableString) -> str:
+    if isinstance(node, NavigableString):
+        text = node.strip()
+        if not text:
+            return ''
+        return _serialize_gutenberg_block('paragraph', f'<p>{html.escape(text)}</p>')
+
+    if not isinstance(node, Tag):
+        return ''
+
+    image_markup = _image_markup_from_node(node)
+    if image_markup:
+        figure_html = image_markup
+        if node.name != 'figure':
+            figure_html = f'<figure class="wp-block-image">{image_markup}</figure>'
+        return _serialize_gutenberg_block('image', figure_html)
+
+    name = node.name.lower()
+    if name == 'p':
+        return _serialize_gutenberg_block('paragraph', str(node))
+    if name in {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}:
+        level = int(name[1])
+        attrs = {'level': level} if level != 2 else None
+        return _serialize_gutenberg_block('heading', str(node), attrs=attrs)
+    if name in {'ul', 'ol'}:
+        _ensure_tag_class(node, 'wp-block-list')
+        attrs = {'ordered': True} if name == 'ol' else None
+        return _serialize_gutenberg_block('list', str(node), attrs=attrs)
+    if name == 'blockquote':
+        _ensure_tag_class(node, 'wp-block-quote')
+        return _serialize_gutenberg_block('quote', str(node))
+    if name == 'pre':
+        _ensure_tag_class(node, 'wp-block-code')
+        return _serialize_gutenberg_block('code', str(node))
+    if name == 'hr':
+        _ensure_tag_class(node, 'wp-block-separator')
+        _ensure_tag_class(node, 'has-alpha-channel-opacity')
+        return _serialize_gutenberg_block('separator', str(node))
+    if name == 'table':
+        figure_html = f'<figure class="wp-block-table">{str(node)}</figure>'
+        return _serialize_gutenberg_block('table', figure_html)
+
+    return prepare_wp_html_block_content(str(node))
+
+
+def markdown_to_gutenberg_blocks(markdown_text: str) -> str:
+    html_content = _render_markdown_html((markdown_text or '').strip())
+    if not html_content.strip():
+        return ''
+    soup = BeautifulSoup(html_content, 'html.parser')
+    blocks = []
+    for node in list(soup.contents):
+        block = _convert_html_to_gutenberg_block(node)
+        if block:
+            blocks.append(block)
+    return '\n\n'.join(blocks).strip()
+
+
+def build_email_preview_html(post_content: str) -> str:
+    soup = BeautifulSoup(post_content or '', 'html.parser')
+    for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+        comment.extract()
+    container = soup.body if soup.body else soup
+    return ''.join(str(child) for child in container.contents).strip()
+
+
+def _inline_email_text(node: Tag | NavigableString) -> str:
+    if isinstance(node, NavigableString):
+        return str(node)
+    if not isinstance(node, Tag):
+        return ''
+    if node.name == 'br':
+        return '\n'
+    if node.name == 'img':
+        alt_text = (node.get('alt') or '').strip()
+        src = (node.get('src') or '').strip()
+        label = alt_text or src
+        return f'[Image: {label}]' if label else '[Image]'
+    return ''.join(_inline_email_text(child) for child in node.children)
+
+
+def _normalize_email_text(text: str) -> str:
+    text = text.replace('\xa0', ' ')
+    text = re.sub(r'[ \t]+\n', '\n', text)
+    text = re.sub(r'\n[ \t]+', '\n', text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def build_email_preview_text(post_content: str) -> str:
+    html_content = build_email_preview_html(post_content)
+    if not html_content:
+        return ''
+    html_content = re.sub(r'(<br\s*/?>)\s*\n', r'\1', html_content, flags=re.I)
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+    container = soup.body if soup.body else soup
+    blocks = []
+
+    def append_block(text: str):
+        normalized = _normalize_email_text(text)
+        if normalized:
+            blocks.append(normalized)
+
+    def append_list(list_tag: Tag, ordered: bool):
+        items = []
+        for index, li in enumerate(list_tag.find_all('li', recursive=False), start=1):
+            prefix = f'{index}. ' if ordered else '* '
+            items.append(prefix + _normalize_email_text(_inline_email_text(li)))
+        append_block('\n'.join(item for item in items if item.strip()))
+
+    for node in container.children:
+        if isinstance(node, NavigableString):
+            text = _normalize_email_text(str(node))
+            if text:
+                blocks.append(text)
+            continue
+        if not isinstance(node, Tag):
+            continue
+        if node.name in {'script', 'style', 'noscript'}:
+            continue
+        if node.name in {'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'blockquote', 'pre'}:
+            append_block(_inline_email_text(node))
+            continue
+        if node.name == 'ul':
+            append_list(node, ordered=False)
+            continue
+        if node.name == 'ol':
+            append_list(node, ordered=True)
+            continue
+        if node.name == 'hr':
+            append_block('---')
+            continue
+        if node.name == 'figure':
+            if 'wp-block-table' in (node.get('class') or []) and node.find('table'):
+                table = node.find('table')
+                rows = []
+                for tr in table.find_all('tr'):
+                    cells = [cell.get_text(' ', strip=True) for cell in tr.find_all(['th', 'td'])]
+                    if cells:
+                        rows.append(' | '.join(cells))
+                append_block('\n'.join(rows))
+                continue
+            img = node.find('img')
+            if img:
+                append_block(_inline_email_text(img))
+                continue
+        if node.name == 'table':
+            rows = []
+            for tr in node.find_all('tr'):
+                cells = [cell.get_text(' ', strip=True) for cell in tr.find_all(['th', 'td'])]
+                if cells:
+                    rows.append(' | '.join(cells))
+            append_block('\n'.join(rows))
+            continue
+        append_block(_inline_email_text(node))
+
+    return '\n\n'.join(blocks).strip()
+
+
 def normalize_post_navigation_content(content: str) -> tuple[str, str]:
     body, nav = split_post_navigation_blocks(content)
     body_format = detect_post_body_format(body)
     normalized_body = body.rstrip()
 
     if body_format == 'markdown':
-        normalized_body = render_markdown((body or '').strip())
+        normalized_body = markdown_to_gutenberg_blocks((body or '').strip())
+    elif body_format == 'html':
+        normalized_body = prepare_wp_html_block_content(normalized_body)
 
     if nav:
         if not normalized_body:
@@ -1437,12 +1661,7 @@ def fetch_wp_page_edit(url, headers, page_id):
 
 
 def prepare_wp_page_content(html_content: str) -> str:
-    content = (html_content or '').strip()
-    if not content:
-        return ''
-    if content.startswith('<!-- wp:html -->'):
-        return content
-    return f'<!-- wp:html -->\n{content}\n<!-- /wp:html -->'
+    return prepare_wp_html_block_content(html_content)
 
 
 def update_page_wp_api(url, headers, page_id, html_content, dry_run=False):

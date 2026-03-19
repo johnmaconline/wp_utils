@@ -22,6 +22,7 @@ from bs4 import BeautifulSoup
 from markdown import markdown
 from datetime import datetime, time, timezone
 from zoneinfo import ZoneInfo
+from tools.wp_utilities import markdown_to_gutenberg_blocks
 
 # ****************************************************************************************
 # Global data and configuration
@@ -137,7 +138,7 @@ Return a JSON object with:
 
 def schedule_post(
         title,
-        content_html,
+        content_markdown,
         publish_datetime_utc,
         excerpt=None):
     
@@ -145,7 +146,7 @@ def schedule_post(
 
     payload = {
         "title"    : title,
-        "content"  : content_html,
+        "content"  : markdown_to_gutenberg_blocks(content_markdown),
         "status"   : "future",
         "date_gmt" : publish_datetime_utc.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -279,7 +280,6 @@ def main():
         publish_date    = datetime.strptime(args.date, "%Y-%m-%d").date()
         publish_dt_utc  = local_to_utc(publish_date, POST_TIME_ET)
         md_raw          = read_markdown_file(args.file)
-        content_html    = markdown(md_raw)
         plain_text      = markdown_to_text(md_raw)
 
         seo             = generate_seo_fields(plain_text, api_key=OPENAI_API_KEY, model=args.model)
@@ -289,7 +289,7 @@ def main():
 
         link = schedule_post(
             title                = args.title,
-            content_html         = content_html,
+            content_markdown     = md_raw,
             publish_datetime_utc = publish_dt_utc,
             excerpt              = excerpt
         )

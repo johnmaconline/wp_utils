@@ -142,8 +142,41 @@ def test_schedule_post_wp_api_dry_run_renders_markdown_and_adds_navigation_block
     )
 
     assert result["action"] == "create"
-    assert result["payload"]["content"].startswith("<p>Body copy</p>")
+    assert result["payload"]["content"].startswith("<!-- wp:paragraph -->")
+    assert "<p>Body copy</p>" in result["payload"]["content"]
     assert result["payload"]["content"].count("wp:post-navigation-link") == 2
+
+
+def test_schedule_post_wp_api_preserves_single_line_feeds_for_email_rendering(monkeypatch):
+    monkeypatch.setattr(wp_utilities, "resolve_term_ids", lambda *_args, **_kwargs: [123])
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_latest_scheduled_date",
+        lambda *_args, **_kwargs: datetime.datetime(2026, 1, 27, 8, 44),
+    )
+    monkeypatch.setattr(wp_utilities, "find_post_by_slug", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda _text, **_kwargs: "<p>Line one<br />\nLine two</p><p>Next para</p>",
+    )
+
+    result = wp_utilities.schedule_post_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "Line one\nLine two\n\nNext para",
+        {"title": "My Post", "categories": ["AI"]},
+        dry_run=True,
+    )
+
+    email_html = wp_utilities.build_email_preview_html(result["payload"]["content"])
+    email_text = wp_utilities.build_email_preview_text(result["payload"]["content"])
+
+    assert "<br" in email_html
+    assert "Line one" in email_html
+    assert "Line two" in email_html
+    assert "<p>Next para</p>" in email_html
+    assert "Line one\nLine two\n\nNext para" in email_text
 
 
 def test_schedule_post_wp_api_dry_run_preserves_html(monkeypatch):
@@ -164,7 +197,8 @@ def test_schedule_post_wp_api_dry_run_preserves_html(monkeypatch):
     )
 
     assert result["action"] == "create"
-    assert result["payload"]["content"].startswith("<p>Body copy</p>")
+    assert result["payload"]["content"].startswith("<!-- wp:html -->")
+    assert "<p>Body copy</p>" in result["payload"]["content"]
     assert result["payload"]["content"].count("wp:post-navigation-link") == 2
 
 
@@ -179,6 +213,7 @@ def test_normalize_post_navigation_content_converts_markdown(monkeypatch):
     )
 
     assert body_format == "markdown"
+    assert updated.startswith("<!-- wp:paragraph -->")
     assert "<p>Line one</p>" in updated
     assert "<p>Line two</p>" in updated
     assert updated.count("wp:post-navigation-link") == 2
@@ -300,6 +335,7 @@ def test_backfill_post_navigation_updates_post(monkeypatch):
     assert rows[0]["action"] == "updated"
     assert captured["url"] == "https://example.com/wp-json/wp/v2/posts/3"
     assert captured["json"]["content"].count("wp:post-navigation-link") == 2
+    assert captured["json"]["content"].startswith("<!-- wp:paragraph -->")
     assert "<p>Hello</p>" in captured["json"]["content"]
     assert "<p>World</p>" in captured["json"]["content"]
     assert stats["needs_update"] == 1
@@ -356,6 +392,7 @@ def test_backfill_post_navigation_updates_markdown_body_with_existing_navigation
     assert rows[0]["action"] == "updated"
     assert rows[0]["content_format"] == "markdown"
     assert captured["url"] == "https://example.com/wp-json/wp/v2/posts/4"
+    assert captured["json"]["content"].startswith("<!-- wp:paragraph -->")
     assert "<p>Hello</p>" in captured["json"]["content"]
     assert "<p>World</p>" in captured["json"]["content"]
     assert captured["json"]["content"].count("wp:post-navigation-link") == 2
@@ -412,6 +449,7 @@ def test_backfill_post_navigation_specific_post_id(monkeypatch):
     assert rows[0]["action"] == "updated"
     assert rows[0]["content_format"] == "markdown"
     assert captured["url"] == "https://example.com/wp-json/wp/v2/posts/42"
+    assert captured["json"]["content"].startswith("<!-- wp:paragraph -->")
     assert "<p>First para</p>" in captured["json"]["content"]
     assert stats["processed"] == 1
     assert stats["needs_update"] == 1
@@ -450,6 +488,99 @@ def test_prepare_wp_page_content_wraps_html_block():
     assert wrapped.startswith("<!-- wp:html -->")
     assert "<div>hello</div>" in wrapped
     assert wrapped.endswith("<!-- /wp:html -->")
+
+
+def test_prepare_wp_html_block_content_preserves_existing_gutenberg_block():
+    content = "<!-- wp:paragraph --><p>hello</p><!-- /wp:paragraph -->"
+    assert wp_utilities.prepare_wp_html_block_content(content) == content
+
+
+def test_build_email_preview_html_strips_gutenberg_comments():
+    content = "<!-- wp:paragraph --><p>Alpha</p><!-- /wp:paragraph -->"
+    assert wp_utilities.build_email_preview_html(content) == "<p>Alpha</p>"
+
+
+def test_build_email_preview_text_preserves_line_feeds_and_paragraphs():
+    content = (
+        "<!-- wp:paragraph --><p>Line one<br />Line two</p><!-- /wp:paragraph -->"
+        "<!-- wp:paragraph --><p>Next para</p><!-- /wp:paragraph -->"
+    )
+
+    assert wp_utilities.build_email_preview_text(content) == "Line one\nLine two\n\nNext para"
+
+
+def test_markdown_to_gutenberg_blocks_serializes_common_native_blocks(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda _text, **_kwargs: (
+            "<h2>Heading</h2>"
+            "<p>Paragraph with <strong>bold</strong> text.</p>"
+            "<ul><li>One</li><li>Two</li></ul>"
+            '<blockquote><p>Quoted</p></blockquote>'
+            '<pre><code class="language-python">print(\'hi\')</code></pre>'
+            "<hr />"
+        ),
+    )
+    blocks = wp_utilities.markdown_to_gutenberg_blocks(
+        "## Heading\n\nParagraph with **bold** text.\n\n- One\n- Two\n\n> Quoted\n\n```python\nprint('hi')\n```\n\n---\n"
+    )
+
+    assert "<!-- wp:heading -->" in blocks
+    assert "<h2>Heading</h2>" in blocks
+    assert "<!-- wp:paragraph -->" in blocks
+    assert "<strong>bold</strong>" in blocks
+    assert "<!-- wp:list -->" in blocks
+    assert '<ul class="wp-block-list">' in blocks
+    assert "<!-- wp:quote -->" in blocks
+    assert 'class="wp-block-quote"' in blocks
+    assert "<!-- wp:code -->" in blocks
+    assert 'class="wp-block-code"' in blocks
+    assert "<!-- wp:separator -->" in blocks
+
+
+def test_markdown_to_gutenberg_blocks_converts_markdown_image_to_image_block(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda _text, **_kwargs: '<p><img src="https://example.com/image.png" alt="Alt text" /></p>',
+    )
+    blocks = wp_utilities.markdown_to_gutenberg_blocks("![Alt text](https://example.com/image.png)")
+
+    assert blocks.startswith("<!-- wp:image -->")
+    assert 'class="wp-block-image"' in blocks
+    assert 'src="https://example.com/image.png"' in blocks
+    assert 'alt="Alt text"' in blocks
+
+
+def test_render_markdown_html_enables_nl2br(monkeypatch):
+    captured = {}
+
+    def fake_markdown(text, extensions=None):
+        captured["text"] = text
+        captured["extensions"] = extensions
+        return "<p>ok</p>"
+
+    monkeypatch.setattr(wp_utilities, "render_markdown", fake_markdown)
+
+    rendered = wp_utilities._render_markdown_html("Line one\nLine two")
+
+    assert rendered == "<p>ok</p>"
+    assert captured["text"] == "Line one\nLine two"
+    assert "nl2br" in captured["extensions"]
+
+
+def test_markdown_to_gutenberg_blocks_renders_single_line_feeds_as_breaks(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda _text, **_kwargs: "<p>Line one<br />\nLine two</p><p>Next para</p>",
+    )
+    blocks = wp_utilities.markdown_to_gutenberg_blocks("Line one\nLine two\n\nNext para")
+
+    assert "<!-- wp:paragraph -->" in blocks
+    assert "<p>Line one<br />\nLine two</p>" in blocks or "<p>Line one<br/>\nLine two</p>" in blocks
+    assert blocks.count("<!-- wp:paragraph -->") == 2
 
 
 def test_update_page_wp_api_skips_when_unchanged(monkeypatch):
