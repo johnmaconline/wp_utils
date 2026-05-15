@@ -1,5 +1,7 @@
 import datetime
 
+import pytest
+
 import wp_utilities
 
 
@@ -200,6 +202,179 @@ def test_schedule_post_wp_api_dry_run_preserves_html(monkeypatch):
     assert result["payload"]["content"].startswith("<!-- wp:html -->")
     assert "<p>Body copy</p>" in result["payload"]["content"]
     assert result["payload"]["content"].count("wp:post-navigation-link") == 2
+
+
+def test_resolve_unschedule_posts_by_id_requires_scheduled_status(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_post_edit",
+        lambda *_args, **_kwargs: {
+            "id": 42,
+            "status": "publish",
+            "title": {"rendered": "Already Live"},
+        },
+    )
+
+    with pytest.raises(ValueError, match="not scheduled"):
+        wp_utilities.resolve_unschedule_posts(
+            "https://example.com",
+            {"Authorization": "Basic token"},
+            "42",
+        )
+
+
+def test_resolve_unschedule_posts_by_name_prefers_exact_match(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_endpoint",
+        lambda *_args, **_kwargs: [
+            {
+                "id": 11,
+                "status": "future",
+                "date": "2026-01-27T08:44:00",
+                "link": "https://example.com/hello-world/",
+                "title": {"rendered": "Hello World"},
+            },
+            {
+                "id": 12,
+                "status": "future",
+                "date": "2026-01-28T08:44:00",
+                "link": "https://example.com/hello-world-again/",
+                "title": {"rendered": "Hello World Again"},
+            },
+        ],
+    )
+
+    matches = wp_utilities.resolve_unschedule_posts(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "hello world",
+    )
+
+    assert len(matches) == 1
+    assert matches[0]["id"] == 11
+
+
+def test_resolve_unschedule_posts_by_name_rejects_ambiguous_partial(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_endpoint",
+        lambda *_args, **_kwargs: [
+            {
+                "id": 11,
+                "status": "future",
+                "date": "2026-01-27T08:44:00",
+                "link": "https://example.com/hello-world/",
+                "title": {"rendered": "Hello World"},
+            },
+            {
+                "id": 12,
+                "status": "future",
+                "date": "2026-01-28T08:44:00",
+                "link": "https://example.com/hello-world-again/",
+                "title": {"rendered": "Hello World Again"},
+            },
+        ],
+    )
+
+    with pytest.raises(ValueError, match="Multiple scheduled posts match"):
+        wp_utilities.resolve_unschedule_posts(
+            "https://example.com",
+            {"Authorization": "Basic token"},
+            "hello",
+        )
+
+
+def test_unschedule_posts_wp_api_dry_run_matches_date(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_endpoint",
+        lambda *_args, **_kwargs: [
+            {
+                "id": 21,
+                "status": "future",
+                "date": "2026-01-27T08:44:00",
+                "link": "https://example.com/one/",
+                "title": {"rendered": "One"},
+            },
+            {
+                "id": 22,
+                "status": "future",
+                "date": "2026-01-27T12:00:00",
+                "link": "https://example.com/two/",
+                "title": {"rendered": "Two"},
+            },
+            {
+                "id": 23,
+                "status": "future",
+                "date": "2026-01-28T08:44:00",
+                "link": "https://example.com/three/",
+                "title": {"rendered": "Three"},
+            },
+        ],
+    )
+
+    rows = wp_utilities.unschedule_posts_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "01-27-2026",
+        dry_run=True,
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["action"] == "would-update"
+    assert rows[0]["status"] == "future"
+    assert rows[1]["id"] == 22
+
+
+def test_unschedule_posts_wp_api_updates_post(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_endpoint",
+        lambda *_args, **_kwargs: [
+            {
+                "id": 31,
+                "status": "future",
+                "date": "2026-01-29T08:44:00",
+                "link": "https://example.com/target/",
+                "title": {"rendered": "Target Post"},
+            },
+        ],
+    )
+
+    captured = {}
+
+    class DummyResponse:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            return {
+                "id": 31,
+                "status": "draft",
+                "link": "https://example.com/?p=31&preview=true",
+            }
+
+    def fake_post(url, headers=None, json=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        return DummyResponse()
+
+    monkeypatch.setattr(wp_utilities.requests, "post", fake_post)
+
+    rows = wp_utilities.unschedule_posts_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "Target Post",
+        dry_run=False,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["action"] == "updated"
+    assert rows[0]["status"] == "draft"
+    assert captured["url"] == "https://example.com/wp-json/wp/v2/posts/31"
+    assert captured["json"] == {"status": "draft"}
 
 
 def test_normalize_post_navigation_content_converts_markdown(monkeypatch):
@@ -481,6 +656,184 @@ def test_update_page_wp_api_dry_run(monkeypatch):
     assert row["action"] == "would-update"
     assert row["content_changed"] == "True"
     assert row["dry_run"] == "True"
+
+
+def test_update_post_wp_api_dry_run_updates_content_only(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_post_edit",
+        lambda *_args, **_kwargs: {
+            "id": 42,
+            "status": "draft",
+            "slug": "hello-world",
+            "link": "https://example.com/hello-world/",
+            "title": {"rendered": "Hello World"},
+            "content": {"raw": "<p>old</p>"},
+            "categories": [1],
+            "tags": [2],
+            "meta": {},
+        },
+    )
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda _text, **_kwargs: "<p>Body copy</p>",
+    )
+
+    result = wp_utilities.update_post_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "Body copy",
+        post_id=42,
+        dry_run=True,
+    )
+
+    row = result["row"]
+    assert row["operation"] == "update-post"
+    assert row["id"] == 42
+    assert row["action"] == "would-update"
+    assert row["content_changed"] == "True"
+    assert row["fields_changed"] == "False"
+    assert result["payload"]["content"].startswith("<!-- wp:paragraph -->")
+    assert "<p>Body copy</p>" in result["payload"]["content"]
+    assert "status" not in result["payload"]
+    assert "date" not in result["payload"]
+
+
+def test_update_post_wp_api_updates_existing_post_by_slug(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "find_post_by_slug",
+        lambda *_args, **_kwargs: {"id": 84, "slug": "old-post"},
+    )
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_post_edit",
+        lambda *_args, **_kwargs: {
+            "id": 84,
+            "status": "publish",
+            "slug": "old-post",
+            "link": "https://example.com/old-post/",
+            "title": {"rendered": "Old Title"},
+            "excerpt": {"raw": "Old excerpt"},
+            "content": {"raw": "<p>old</p>"},
+            "categories": [1],
+            "tags": [2],
+            "meta": {
+                "yoast_wpseo_focuskw": "old keyphrase",
+                "yoast_wpseo_metadesc": "Old description",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda _text, **_kwargs: "<p>Updated body</p>",
+    )
+
+    def fake_resolve_term_ids(_url, _headers, endpoint, names, create_missing=False, warn_missing=False):
+        assert create_missing is True
+        assert warn_missing is False
+        return [11] if endpoint == "categories" else [22]
+
+    monkeypatch.setattr(wp_utilities, "resolve_term_ids", fake_resolve_term_ids)
+
+    captured = {}
+
+    class DummyResponse:
+        status_code = 200
+        text = "ok"
+
+        @staticmethod
+        def json():
+            return {
+                "id": 84,
+                "status": "publish",
+                "link": "https://example.com/new-post/",
+                "title": {"rendered": "New Title"},
+            }
+
+    def fake_post(url, headers=None, json=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        return DummyResponse()
+
+    monkeypatch.setattr(wp_utilities.requests, "post", fake_post)
+
+    result = wp_utilities.update_post_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "Updated body",
+        meta={
+            "title": "New Title",
+            "excerpt": "New excerpt",
+            "slug": "new-post",
+            "categories": ["AI"],
+            "tags": ["Automation"],
+            "focus_keyphrase": "new keyphrase",
+            "meta_description": "New description",
+        },
+        post_slug="old-post",
+        dry_run=False,
+    )
+
+    row = result["row"]
+    assert row["action"] == "updated"
+    assert row["title"] == "New Title"
+    assert row["content_changed"] == "True"
+    assert row["fields_changed"] == "True"
+    assert captured["url"] == "https://example.com/wp-json/wp/v2/posts/84"
+    assert captured["json"]["title"] == "New Title"
+    assert captured["json"]["excerpt"] == "New excerpt"
+    assert captured["json"]["slug"] == "new-post"
+    assert captured["json"]["categories"] == [11]
+    assert captured["json"]["tags"] == [22]
+    assert captured["json"]["content"].startswith("<!-- wp:paragraph -->")
+    assert captured["json"]["meta"] == {
+        "yoast_wpseo_focuskw": "new keyphrase",
+        "_yoast_wpseo_focuskw": "new keyphrase",
+        "yoast_wpseo_metadesc": "New description",
+        "_yoast_wpseo_metadesc": "New description",
+    }
+
+
+def test_update_post_wp_api_skips_when_unchanged(monkeypatch):
+    monkeypatch.setattr(
+        wp_utilities,
+        "render_markdown",
+        lambda _text, **_kwargs: "<p>Body copy</p>",
+    )
+    prepared = wp_utilities.normalize_post_navigation_content("Body copy")[0]
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_post_edit",
+        lambda *_args, **_kwargs: {
+            "id": 42,
+            "status": "publish",
+            "slug": "hello-world",
+            "link": "https://example.com/hello-world/",
+            "title": {"rendered": "Hello World"},
+            "content": {"raw": prepared},
+            "categories": [1],
+            "tags": [2],
+            "meta": {},
+        },
+    )
+
+    result = wp_utilities.update_post_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "Body copy",
+        post_id=42,
+        dry_run=False,
+    )
+
+    row = result["row"]
+    assert row["action"] == "skipped-no-change"
+    assert row["content_changed"] == "False"
+    assert row["fields_changed"] == "False"
+    assert result["payload"] == {}
 
 
 def test_prepare_wp_page_content_wraps_html_block():

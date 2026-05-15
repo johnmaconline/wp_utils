@@ -758,6 +758,10 @@ def handle_args():
         help='Path to existing metadata JSON (skip LLM generation).'
     )
     parser.add_argument(
+        '--unschedule',
+        help='Unschedule future post(s) by ID, title, or date and change them to drafts.'
+    )
+    parser.add_argument(
         '--schedule',
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -849,11 +853,14 @@ def handle_args():
     log.info(f'+  Target URL: {args.url}')
     log.info(f'+  Content inputs: {args.content_md}')
     log.info(f'+  Invoke LLM: {args.invoke_llm}')
+    if args.unschedule:
+        log.info(f'+  Unschedule target: {args.unschedule}')
     if args.suggest:
         log.info('+  Suggest enabled (topic ideas only)')
     if args.meta_json:
         log.info(f'+  Meta JSON: {args.meta_json}')
-    log.info(f'+  Schedule: {args.schedule}')
+    if not args.unschedule:
+        log.info(f'+  Schedule: {args.schedule}')
     if args.dry_run:
         log.info('+  Dry run enabled (no publish)')
     if args.preview:
@@ -874,6 +881,35 @@ def handle_args():
 
 def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
     log.debug(f'run_agentic_workflow: args={args}')
+    headers = {
+        'User-Agent': 'wp-agent/1.0'
+    }
+    if args.wp_username and args.wp_app_password:
+        headers.update(wpu.build_auth_header(args.wp_username, args.wp_app_password))
+
+    if args.unschedule:
+        if not (args.wp_username and args.wp_app_password):
+            log.error('Missing WP credentials for unschedule.')
+            return 2, {}
+        try:
+            rows = wpu.unschedule_posts_wp_api(
+                args.url,
+                headers,
+                args.unschedule,
+                dry_run=args.dry_run,
+            )
+        except ValueError as exc:
+            log.error(str(exc))
+            return 2, {}
+        if rows:
+            print(wpu.render_ascii_table(rows))
+            out_dir = Path(args.outdir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / 'unschedule_results.json'
+            out_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding='utf-8')
+            log.info(f'Wrote unschedule results => {out_path}')
+        return 0, {}
+
     _init_google_client(os.environ.get('GOOGLE_ADK_API_KEY'), args.llm_model)
     if args.meta_json and args.invoke_llm:
         log.info('Meta JSON provided; skipping LLM generation.')
@@ -906,12 +942,6 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
         if publish_date and len(md_list) > 1:
             log.error('Using --publish-date with multiple markdown inputs is not supported.')
             return 2, {}
-
-    headers = {
-        'User-Agent': 'wp-agent/1.0'
-    }
-    if args.wp_username and args.wp_app_password:
-        headers.update(wpu.build_auth_header(args.wp_username, args.wp_app_password))
 
     if args.schedule and not (args.wp_username and args.wp_app_password):
         log.error('Missing WP credentials for scheduling.')

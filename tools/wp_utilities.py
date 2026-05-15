@@ -401,6 +401,8 @@ def _select_columns(rows):
             'get-posts': ['title', 'date', 'url', 'txt', 'md', 'docx', 'meta'],
             'list-posts': ['id', 'title', 'status', 'date', 'link'],
             'get-pages': ['id', 'title', 'status', 'date', 'link'],
+            'unschedule': ['id', 'title', 'status', 'date', 'action', 'dry_run', 'link'],
+            'update-post': ['id', 'title', 'status', 'action', 'dry_run', 'content_changed', 'fields_changed', 'link'],
             'update-page': ['id', 'title', 'status', 'action', 'dry_run', 'content_changed', 'link'],
             'get-categories': ['id', 'name', 'slug', 'count', 'parent', 'description'],
             'get-tags': ['id', 'name', 'slug', 'count', 'description'],
@@ -1318,6 +1320,123 @@ def fetch_scheduled_posts(url, headers, tz_name, start_date: date | None = None,
     return posts
 
 
+def parse_unschedule_date(target: str) -> date | None:
+    if not target:
+        return None
+    raw = target.strip()
+    if not raw:
+        return None
+    for parser in (
+        parse_publish_date,
+        lambda value: datetime.strptime(value, '%Y-%m-%d').date(),
+        lambda value: datetime.fromisoformat(value.replace('Z', '+00:00')).date(),
+    ):
+        try:
+            return parser(raw)
+        except ValueError:
+            continue
+    return None
+
+
+def _post_title_text(post: dict[str, Any]) -> str:
+    title_obj = post.get('title') or {}
+    if isinstance(title_obj, dict):
+        title_html = title_obj.get('rendered', '') or ''
+    else:
+        title_html = str(title_obj or '')
+    return BeautifulSoup(title_html, 'html.parser').get_text().strip()
+
+
+def _fetch_scheduled_post_matches(url, headers):
+    params = {
+        'context': 'edit',
+        'status': 'future',
+        '_fields': 'id,date,status,link,title',
+    }
+    posts = fetch_wp_endpoint(url, 'posts', headers, params=params)
+    if not isinstance(posts, list):
+        raise ValueError('Failed to fetch scheduled posts.')
+    return posts
+
+
+def resolve_unschedule_posts(url, headers, target):
+    raw_target = (target or '').strip()
+    if not raw_target:
+        raise ValueError('unschedule target is required')
+
+    if raw_target.isdigit():
+        post = fetch_wp_post_edit(url, headers, int(raw_target))
+        status = post.get('status') or ''
+        if status != 'future':
+            raise ValueError(f"Post {raw_target} is not scheduled (status={status or 'unknown'}).")
+        return [post]
+
+    posts = _fetch_scheduled_post_matches(url, headers)
+    target_date = parse_unschedule_date(raw_target)
+    if target_date is not None:
+        matches = []
+        for post in posts:
+            date_str = post.get('date') or ''
+            if not date_str:
+                continue
+            try:
+                post_date = datetime.fromisoformat(date_str.replace('Z', '+00:00')).date()
+            except ValueError:
+                continue
+            if post_date == target_date:
+                matches.append(post)
+        if not matches:
+            raise ValueError(f"No scheduled posts found for date '{raw_target}'.")
+        return matches
+
+    normalized_target = raw_target.casefold()
+    exact_matches = [post for post in posts if _post_title_text(post).casefold() == normalized_target]
+    if len(exact_matches) == 1:
+        return exact_matches
+    if len(exact_matches) > 1:
+        details = ', '.join(f"{_post_title_text(post)} (id={post.get('id')})" for post in exact_matches)
+        raise ValueError(f"Multiple scheduled posts exactly match '{raw_target}': {details}")
+
+    partial_matches = [post for post in posts if normalized_target in _post_title_text(post).casefold()]
+    if len(partial_matches) == 1:
+        return partial_matches
+    if len(partial_matches) > 1:
+        details = ', '.join(f"{_post_title_text(post)} (id={post.get('id')})" for post in partial_matches)
+        raise ValueError(f"Multiple scheduled posts match '{raw_target}': {details}")
+
+    raise ValueError(f"No scheduled post found matching '{raw_target}'.")
+
+
+def unschedule_posts_wp_api(url, headers, target, dry_run=False):
+    posts = resolve_unschedule_posts(url, headers, target)
+    posts_url = build_wp_api_posts_url(url)
+    rows = []
+    for post in posts:
+        post_id = post.get('id')
+        row = {
+            'operation': 'unschedule',
+            'id': post_id or '',
+            'title': _post_title_text(post),
+            'status': post.get('status') or '',
+            'date': format_wp_api_date(post.get('date') or ''),
+            'action': 'would-update' if dry_run else 'updated',
+            'dry_run': str(bool(dry_run)),
+            'link': post.get('link') or '',
+        }
+        rows.append(row)
+        if dry_run:
+            continue
+
+        update_url = posts_url.rstrip('/') + f'/{post_id}'
+        response = requests.post(update_url, headers=headers, json={'status': 'draft'})
+        if response.status_code >= 400:
+            raise ValueError(f"Failed to unschedule post {post_id}: {response.status_code} {response.text}")
+        updated = response.json()
+        row['status'] = updated.get('status') or row['status']
+        row['link'] = updated.get('link') or row['link']
+    return rows
+
+
 def shift_scheduled_posts(url, headers, start_date: date, tz_name=DEFAULT_TIMEZONE, dry_run=False, exclude_ids: set[int] | None = None):
     if not start_date:
         return []
@@ -1632,6 +1751,59 @@ def normalize_post_navigation_content(content: str) -> tuple[str, str]:
     return ensure_post_navigation_blocks(normalized_body), body_format
 
 
+def _extract_wp_text(value: Any) -> str:
+    if isinstance(value, dict):
+        raw_value = value.get('raw')
+        if isinstance(raw_value, str) and raw_value.strip():
+            return raw_value.strip()
+        rendered_value = value.get('rendered')
+        if isinstance(rendered_value, str) and rendered_value.strip():
+            return BeautifulSoup(rendered_value, 'html.parser').get_text().strip()
+        return ''
+    if isinstance(value, str):
+        return value.strip()
+    return ''
+
+
+def _normalize_taxonomy_names(value: Any, field_name: str) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise ValueError(f'{field_name} must be a list of names.')
+    return [item for item in value if item]
+
+
+def _resolve_update_post_target(url, headers, post_id=None, post_slug=None):
+    if post_id is None and not post_slug:
+        raise ValueError('Must supply --post-id or --post-slug for --update-post')
+    if post_id is not None and post_slug:
+        raise ValueError('Use either --post-id or --post-slug for --update-post, not both')
+
+    if post_id is not None:
+        return fetch_wp_post_edit(url, headers, post_id)
+
+    existing = find_post_by_slug(url, headers, post_slug)
+    if not existing:
+        raise ValueError(f"No post found for slug '{post_slug}'")
+
+    existing_id = existing.get('id')
+    if existing_id is None:
+        raise ValueError(f"Post found for slug '{post_slug}' has no ID")
+
+    if 'content' in existing:
+        return existing
+    return fetch_wp_post_edit(url, headers, existing_id)
+
+
+def _meta_value(meta: dict[str, Any], keys: list[str]) -> tuple[Any, bool]:
+    for key in keys:
+        if key in meta:
+            return meta.get(key), True
+    return None, False
+
+
 def fetch_wp_post_edit(url, headers, post_id):
     posts_url = build_wp_api_posts_url(url)
     if not posts_url:
@@ -1699,6 +1871,131 @@ def update_page_wp_api(url, headers, page_id, html_content, dry_run=False):
     row['status'] = updated.get('status') or row['status']
     row['link'] = updated.get('link') or row['link']
     return row
+
+
+def update_post_wp_api(url, headers, content_md, meta=None, post_id=None, post_slug=None, dry_run=False):
+    detail = _resolve_update_post_target(url, headers, post_id=post_id, post_slug=post_slug)
+    resolved_post_id = detail.get('id')
+    if resolved_post_id is None:
+        raise ValueError('Resolved post is missing an ID')
+
+    posts_url = build_wp_api_posts_url(url)
+    title = _extract_wp_text(detail.get('title'))
+    current_content = ((detail.get('content') or {}).get('raw') or '')
+    normalized_content, _body_format = normalize_post_navigation_content(content_md)
+
+    if meta is None:
+        meta = {}
+    if not isinstance(meta, dict):
+        raise ValueError('Metadata JSON must be an object.')
+
+    payload = {}
+    content_changed = normalized_content != current_content
+    if content_changed:
+        payload['content'] = normalized_content
+
+    provided_title, has_title = _meta_value(meta, ['title', 'post_title'])
+    if has_title:
+        updated_title = str(provided_title or '').strip()
+        if not updated_title:
+            raise ValueError('title must not be empty when provided.')
+        if updated_title != title:
+            payload['title'] = updated_title
+
+    provided_excerpt, has_excerpt = _meta_value(meta, ['excerpt'])
+    if has_excerpt:
+        updated_excerpt = str(provided_excerpt or '')
+        if updated_excerpt != _extract_wp_text(detail.get('excerpt')):
+            payload['excerpt'] = updated_excerpt
+
+    provided_slug, has_slug = _meta_value(meta, ['slug'])
+    if has_slug:
+        updated_slug = str(provided_slug or '').strip()
+        if not updated_slug:
+            raise ValueError('slug must not be empty when provided.')
+        if updated_slug != (detail.get('slug') or ''):
+            payload['slug'] = updated_slug
+
+    categories = _normalize_taxonomy_names(meta.get('categories'), 'categories')
+    if categories is not None:
+        category_ids = resolve_term_ids(url, headers, 'categories', categories, create_missing=True)
+        if sorted(category_ids) != sorted(detail.get('categories') or []):
+            payload['categories'] = category_ids
+
+    tags = _normalize_taxonomy_names(meta.get('tags'), 'tags')
+    if tags is not None:
+        tag_ids = resolve_term_ids(url, headers, 'tags', tags, create_missing=True)
+        if sorted(tag_ids) != sorted(detail.get('tags') or []):
+            payload['tags'] = tag_ids
+
+    current_meta = detail.get('meta') or {}
+    meta_updates = {}
+    focus_keyphrase, has_focus_keyphrase = _meta_value(
+        meta,
+        ['yoast_wpseo_focuskw', 'yoast_focus_keyphrase', 'focus_keyphrase'],
+    )
+    if has_focus_keyphrase:
+        focus_keyphrase = str(focus_keyphrase or '')
+        if focus_keyphrase != (current_meta.get('yoast_wpseo_focuskw') or ''):
+            meta_updates['yoast_wpseo_focuskw'] = focus_keyphrase
+            meta_updates['_yoast_wpseo_focuskw'] = focus_keyphrase
+
+    meta_description, has_meta_description = _meta_value(
+        meta,
+        ['yoast_wpseo_metadesc', 'yoast_meta_description', 'meta_description'],
+    )
+    if has_meta_description:
+        meta_description = str(meta_description or '')
+        if meta_description != (current_meta.get('yoast_wpseo_metadesc') or ''):
+            meta_updates['yoast_wpseo_metadesc'] = meta_description
+            meta_updates['_yoast_wpseo_metadesc'] = meta_description
+
+    if meta_updates:
+        payload['meta'] = meta_updates
+
+    field_keys = [key for key in payload if key != 'content']
+    row = {
+        'operation': 'update-post',
+        'id': resolved_post_id,
+        'title': payload.get('title') or title,
+        'status': detail.get('status') or '',
+        'link': detail.get('link') or '',
+        'dry_run': str(bool(dry_run)),
+        'content_changed': str(bool(content_changed)),
+        'fields_changed': str(bool(field_keys)),
+    }
+
+    if not payload:
+        row['action'] = 'skipped-no-change'
+        return {
+            'row': row,
+            'payload': payload,
+            'post': detail,
+        }
+
+    row['action'] = 'would-update' if dry_run else 'updated'
+    if dry_run:
+        return {
+            'row': row,
+            'payload': payload,
+            'post': detail,
+        }
+
+    update_url = posts_url.rstrip('/') + f'/{resolved_post_id}'
+    response = requests.post(update_url, headers=headers, json=payload)
+    if response.status_code >= 400:
+        raise ValueError(f'Failed to update post {resolved_post_id}: {response.status_code} {response.text}')
+    updated = response.json()
+    row['status'] = updated.get('status') or row['status']
+    row['link'] = updated.get('link') or row['link']
+    updated_title = _extract_wp_text(updated.get('title'))
+    if updated_title:
+        row['title'] = updated_title
+    return {
+        'row': row,
+        'payload': payload,
+        'post': updated,
+    }
 
 
 def backfill_post_navigation(
@@ -2312,9 +2609,16 @@ def handle_args():
         action='store_true',
         help='Schedule a post via the REST API using markdown content and metadata JSON.')
     parser.add_argument(
+        '--unschedule',
+        help='Unschedule future post(s) by ID, title, or date and change them to drafts.')
+    parser.add_argument(
         '--backfill-post-navigation',
         action='store_true',
         help='Normalize existing post bodies to HTML and ensure Gutenberg previous/next navigation blocks are present.')
+    parser.add_argument(
+        '--update-post',
+        action='store_true',
+        help='Replace a WordPress post body with markdown content rendered as native Gutenberg blocks.')
     parser.add_argument(
         '--update-page',
         action='store_true',
@@ -2322,27 +2626,30 @@ def handle_args():
     parser.add_argument(
         '--post-id',
         type=int,
-        help='Specific WordPress post ID to target for --backfill-post-navigation.')
+        help='Specific WordPress post ID to target for --backfill-post-navigation or --update-post.')
+    parser.add_argument(
+        '--post-slug',
+        help='Specific WordPress post slug to target for --update-post.')
     parser.add_argument(
         '--page-id',
         type=int,
         help='Specific WordPress page ID to target for --update-page.')
     parser.add_argument(
         '--content-md',
-        help='Path to markdown content file (use - for stdin) for --schedule-post')
+        help='Path to markdown content file (use - for stdin) for --schedule-post or --update-post')
     parser.add_argument(
         '--html-file',
         help='Path to an HTML file for --update-page')
     parser.add_argument(
         '--meta-json',
-        help='Path to metadata JSON file for --schedule-post')
+        help='Path to metadata JSON file for --schedule-post or --update-post')
     parser.add_argument(
         '--publish-date',
         help='Publish date for --schedule-post (MM-DD-YYYY, scheduled at 8:44am Eastern)')
     parser.add_argument(
         '--dry-run',
         action='store_true',
-        help='Show planned changes without making updates (used with --schedule-post).')
+        help='Show planned changes without making updates (used with --schedule-post, --update-post, and related write actions).')
     parser.add_argument(
         '--force',
         action='store_true',
@@ -2350,7 +2657,7 @@ def handle_args():
     parser.add_argument(
         '--preview',
         action='store_true',
-        help='Print the final scheduled post payload (used with --schedule-post).')
+        help='Print the final post payload (used with --schedule-post or --update-post).')
     parser.add_argument(
         '--export-site',
         help='Export site data via REST API: all, all-no-media, or comma-separated list (posts,pages,media,comments,users,categories,tags,taxonomies,types,statuses,settings,menus,plugins)')
@@ -2491,12 +2798,32 @@ def handle_args():
             except ValueError as exc:
                 log.error(f'XXX {exc}')
                 sys.exit(1)
+    if args.unschedule:
+        if not args.url:
+            log.error('XXX Must supply a URL for --unschedule')
+            sys.exit(1)
+        if not args.wp_username or not args.wp_app_password:
+            log.error('XXX Missing WP credentials for --unschedule')
+            sys.exit(1)
     if args.backfill_post_navigation:
         if not args.url:
             log.error('XXX Must supply a URL for --backfill-post-navigation')
             sys.exit(1)
         if not args.wp_username or not args.wp_app_password:
             log.error('XXX Missing WP credentials for --backfill-post-navigation')
+            sys.exit(1)
+    if args.update_post:
+        if not args.url:
+            log.error('XXX Must supply a URL for --update-post')
+            sys.exit(1)
+        if not args.wp_username or not args.wp_app_password:
+            log.error('XXX Missing WP credentials for --update-post')
+            sys.exit(1)
+        if not args.content_md:
+            log.error('XXX Must supply --content-md for --update-post')
+            sys.exit(1)
+        if (args.post_id is None) == (not args.post_slug):
+            log.error('XXX Must supply exactly one of --post-id or --post-slug for --update-post')
             sys.exit(1)
     if args.update_page:
         if not args.url:
@@ -2511,10 +2838,13 @@ def handle_args():
         if not args.html_file:
             log.error('XXX Must supply --html-file for --update-page')
             sys.exit(1)
-    if args.post_id and not args.backfill_post_navigation:
-        log.error('XXX --post-id requires --backfill-post-navigation')
+    if args.post_id is not None and not (args.backfill_post_navigation or args.update_post):
+        log.error('XXX --post-id requires --backfill-post-navigation or --update-post')
         sys.exit(1)
-    if args.page_id and not args.update_page:
+    if args.post_slug and not args.update_post:
+        log.error('XXX --post-slug requires --update-post')
+        sys.exit(1)
+    if args.page_id is not None and not args.update_page:
         log.error('XXX --page-id requires --update-page')
         sys.exit(1)
     if (args.get_plugins or args.list_posts or args.get_pages or args.get_categories or args.get_tags or
@@ -2554,6 +2884,12 @@ def handle_args():
             log.info('+  Preview enabled (payload will be printed)')
         if args.force:
             log.info('+  Force enabled (skip update prompts)')
+    if args.unschedule:
+        log.info('+  Unscheduling post(s) via WP API')
+        log.info(f'+  Target URL: {args.url}')
+        log.info(f'+  Unschedule target: {args.unschedule}')
+        if args.dry_run:
+            log.info('+  Dry run enabled (no posts will be updated)')
     if args.backfill_post_navigation:
         log.info('+  Normalizing post bodies and backfilling post navigation via WP API')
         log.info(f'+  Target URL: {args.url}')
@@ -2565,6 +2901,20 @@ def handle_args():
             log.info(f'+  Limit: {args.number}')
         if args.dry_run:
             log.info('+  Dry run enabled (no posts will be updated)')
+    if args.update_post:
+        log.info('+  Updating post via WP API')
+        log.info(f'+  Target URL: {args.url}')
+        if args.post_id is not None:
+            log.info(f'+  Post ID: {args.post_id}')
+        else:
+            log.info(f'+  Post slug: {args.post_slug}')
+        log.info(f'+  Content markdown: {args.content_md}')
+        if args.meta_json:
+            log.info(f'+  Metadata JSON: {args.meta_json}')
+        if args.dry_run:
+            log.info('+  Dry run enabled (no post will be updated)')
+        if args.preview:
+            log.info('+  Preview enabled (payload will be printed)')
     if args.update_page:
         log.info('+  Updating page via WP API')
         log.info(f'+  Target URL: {args.url}')
@@ -2619,7 +2969,8 @@ def handle_args():
     results_ops = [
         args.get_posts, args.list_posts, args.get_plugins, args.get_pages, args.get_categories, args.get_tags,
         args.get_users, args.get_user_me, args.get_media, args.get_comments, args.get_types, args.get_statuses,
-        args.get_taxonomies, args.get_settings, args.get_themes, args.schedule_post, args.backfill_post_navigation,
+        args.get_taxonomies, args.get_settings, args.get_themes, args.schedule_post, args.unschedule,
+        args.backfill_post_navigation, args.update_post,
         args.update_page
     ]
     if any(results_ops):
@@ -2630,8 +2981,12 @@ def handle_args():
             actions.append('get-posts (download)')
         if args.schedule_post:
             actions.append('schedule-post')
+        if args.unschedule:
+            actions.append('unschedule')
         if args.backfill_post_navigation:
             actions.append('backfill-post-navigation')
+        if args.update_post:
+            actions.append('update-post')
         if args.update_page:
             actions.append('update-page')
         if args.list_posts:
@@ -2842,6 +3197,21 @@ def main():
         except ValueError as exc:
             log.error(f'XXX {exc}')
             sys.exit(1)
+    if args.unschedule:
+        try:
+            rows = unschedule_posts_wp_api(
+                args.url,
+                headers,
+                args.unschedule,
+                dry_run=args.dry_run,
+            )
+            op_counts['unschedule'] = len(rows)
+            results_rows.extend(rows)
+            if rows:
+                print(render_ascii_table(rows))
+        except ValueError as exc:
+            log.error(f'XXX {exc}')
+            sys.exit(1)
     if args.backfill_post_navigation:
         try:
             status_map = {'published': 'publish', 'scheduled': 'future', 'draft': 'draft'}
@@ -2864,6 +3234,55 @@ def main():
                 f'needs_update={stats["needs_update"]}, '
                 f'skipped={stats["skipped"]}'
             )
+        except ValueError as exc:
+            log.error(f'XXX {exc}')
+            sys.exit(1)
+    if args.update_post:
+        try:
+            meta = load_meta_json(args.meta_json) if args.meta_json else {}
+            content_md = strip_leading_h1(read_markdown_content(args.content_md))
+            base_dir = os.path.dirname(args.content_md) if args.content_md != '-' else os.getcwd()
+            uploads = []
+            if args.dry_run:
+                log.info('*** this is a dry-run ***')
+                local_images = find_local_markdown_images(content_md, base_dir)
+                missing = [path for path in local_images if not os.path.exists(path)]
+                if missing:
+                    raise ValueError(f"Missing local images: {', '.join(missing)}")
+                if local_images:
+                    log.info(f'+  Dry run: would upload {len(local_images)} image(s)')
+                result = update_post_wp_api(
+                    args.url,
+                    headers,
+                    content_md,
+                    meta=meta,
+                    post_id=args.post_id,
+                    post_slug=args.post_slug,
+                    dry_run=True,
+                )
+            else:
+                content_md, uploads = upload_media_and_replace(content_md, base_dir, args.url, headers)
+                if uploads:
+                    log.info(f'+  Uploaded {len(uploads)} image(s)')
+                result = update_post_wp_api(
+                    args.url,
+                    headers,
+                    content_md,
+                    meta=meta,
+                    post_id=args.post_id,
+                    post_slug=args.post_slug,
+                    dry_run=False,
+                )
+            if args.preview:
+                print(json.dumps(result.get('payload', {}), indent=2))
+            row = dict(result.get('row') or {})
+            row['media_uploaded'] = len(uploads)
+            results_rows.append(row)
+            op_counts['update-post'] = 1
+            print(render_ascii_table([row]))
+        except OSError as exc:
+            log.error(f'XXX Failed to read markdown or metadata file: {exc}')
+            sys.exit(1)
         except ValueError as exc:
             log.error(f'XXX {exc}')
             sys.exit(1)

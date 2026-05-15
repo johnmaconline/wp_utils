@@ -27,6 +27,7 @@ Results from `--get-plugins`, `--get-posts`, or any other `--get-*` operation ar
 - `--with-meta` Save per-post metadata JSON alongside downloaded posts
 - `--get-posts` Download posts
 - `--schedule-post` Schedule a post using markdown content + metadata JSON
+- `--unschedule` Unschedule future post(s) by ID, title, or date and change them to drafts
 - `--content-md` Markdown file path for `--schedule-post` (use `-` for stdin)
 - `--meta-json` Metadata JSON file path for `--schedule-post`
 - `--publish-date` Publish date (MM-DD-YYYY, scheduled at 8:44am Eastern; shifts existing scheduled posts by +1 day starting that date)
@@ -128,6 +129,15 @@ Examples:
     "meta_description": "AI can teach information, but intuition still requires years of repetition."
   }
   ```
+- Unschedule a future post and turn it into a draft:
+  ```bash
+  python3 wp_utilities.py --unschedule 56934 --url https://johnmaconline.com --dry-run
+  ```
+  You can target by post ID, title, or date:
+  ```bash
+  python3 wp_utilities.py --unschedule "Your Agent Workforce" --url https://johnmaconline.com
+  python3 wp_utilities.py --unschedule 03-17-2026 --url https://johnmaconline.com
+  ```
 - Export everything but media binaries (metadata only):
   ```bash
   python3 wp_utilities.py --export-site all-no-media --url https://johnmaconline.com
@@ -159,6 +169,7 @@ Args:
 - `--invoke-llm` Call OpenAI to generate metadata JSON
 - `--suggest` Suggest 10 topic ideas for the next article (LLM). Uses `--url` as input.
 - `--meta-json` Use existing metadata JSON (skip LLM generation)
+- `--unschedule` Unschedule future post(s) by ID, title, or date and change them to drafts
 - `--schedule/--no-schedule` Schedule posts after metadata (default: true)
 - `--dry-run` No publish
 - `--preview` Print the final WordPress payload
@@ -225,6 +236,12 @@ Use an existing meta JSON (skip LLM):
 python3 wp_agent.py \
   --content-md "new_posts/post.md" \
   --meta-json "out/post_slug/meta.json"
+```
+
+Unschedule a future post:
+```bash
+python3 wp_agent.py --unschedule 03-19-2026 --dry-run
+python3 wp_agent.py --unschedule "Your Agent Workforce"
 ```
 - Incremental export of posts + media:
   ```bash
