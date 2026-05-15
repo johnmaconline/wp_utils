@@ -170,6 +170,9 @@ Args:
 - `--suggest` Suggest 10 topic ideas for the next article (LLM). Uses `--url` as input.
 - `--meta-json` Use existing metadata JSON (skip LLM generation)
 - `--unschedule` Unschedule future post(s) by ID, title, or date and change them to drafts
+- `--update-post` Update an existing post by exact title, slug, or WordPress post ID
+- `--update` Fields to update for `--update-post`: `content`, `title`, `date`, `status` (default: `content`)
+- `--status` WordPress status to set when using `--update status`
 - `--schedule/--no-schedule` Schedule posts after metadata (default: true)
 - `--dry-run` No publish
 - `--preview` Print the final WordPress payload
@@ -243,6 +246,33 @@ Unschedule a future post:
 python3 wp_agent.py --unschedule 03-19-2026 --dry-run
 python3 wp_agent.py --unschedule "Your Agent Workforce"
 ```
+
+Update an existing or scheduled post without regenerating metadata:
+```bash
+python3 wp_agent.py \
+  --update-post "Kill Your Darlings" \
+  --content-md "$HOME/Documents/johnmaconline/blog/posts/kill-your-darlings.md" \
+  --update content
+```
+
+Change only the scheduled date:
+```bash
+python3 wp_agent.py \
+  --update-post 57067 \
+  --update date \
+  --publish-date 05-18-2026
+```
+
+Replace content and reschedule in one call:
+```bash
+python3 wp_agent.py \
+  --update-post 57067 \
+  --content-md "$HOME/Documents/johnmaconline/blog/posts/kill-your-darlings.md" \
+  --update content,date \
+  --publish-date 05-18-2026
+```
+
+To also update the WordPress title from the markdown H1, use `--update content,title`.
 - Incremental export of posts + media:
   ```bash
   python3 wp_utilities.py --export-site posts,media --incremental --url https://johnmaconline.com

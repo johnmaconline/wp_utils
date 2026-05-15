@@ -1266,6 +1266,24 @@ def parse_publish_date(date_str: str) -> date:
         raise ValueError('publish-date must be MM-DD-YYYY') from exc
 
 
+def parse_update_post_datetime(date_str: str, tz_name=DEFAULT_TIMEZONE) -> datetime:
+    if not date_str:
+        raise ValueError('--publish-date is required when updating date')
+    raw = date_str.strip()
+    try:
+        publish_day = parse_publish_date(raw)
+        return datetime.combine(publish_day, time(8, 44), tzinfo=ZoneInfo(tz_name))
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    except ValueError as exc:
+        raise ValueError('publish-date must be MM-DD-YYYY or ISO datetime') from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo(tz_name))
+    return parsed.astimezone(ZoneInfo(tz_name))
+
+
 def _coerce_publish_date(publish_date: Any) -> date | None:
     if not publish_date:
         return None
@@ -1345,6 +1363,74 @@ def _post_title_text(post: dict[str, Any]) -> str:
     else:
         title_html = str(title_obj or '')
     return BeautifulSoup(title_html, 'html.parser').get_text().strip()
+
+
+def _post_slugify(text: str, default: str = 'post') -> str:
+    slug = re.sub(r'[^a-z0-9]+', '-', (text or '').strip().lower()).strip('-')
+    return slug or default
+
+
+def extract_h1_title(markdown_text: str) -> str:
+    for line in (markdown_text or '').splitlines():
+        if not line.strip():
+            continue
+        match = re.match(r'^\s*#\s+(.+?)\s*$', line)
+        if match:
+            return match.group(1).strip()
+        break
+    return ''
+
+
+def _normalize_match_text(value: str) -> str:
+    return re.sub(r'\s+', ' ', (value or '').strip()).casefold()
+
+
+def resolve_update_post_target(url, headers, target):
+    raw_target = (target or '').strip()
+    if not raw_target:
+        raise ValueError('--update-post target is required')
+
+    if raw_target.isdigit():
+        return fetch_wp_post_edit(url, headers, int(raw_target))
+
+    slug_candidate = _post_slugify(raw_target)
+    existing = find_post_by_slug(url, headers, slug_candidate)
+    if existing:
+        existing_id = existing.get('id')
+        if existing_id is None:
+            raise ValueError(f"Post found for slug '{slug_candidate}' has no ID")
+        return fetch_wp_post_edit(url, headers, existing_id)
+
+    posts = fetch_wp_endpoint(
+        url,
+        'posts',
+        headers,
+        params={
+            'context': 'edit',
+            'status': 'any',
+            'search': raw_target,
+            '_fields': 'id,slug,date,status,link,title',
+        },
+    )
+    if not isinstance(posts, list):
+        raise ValueError(f"Failed to search posts for '{raw_target}'.")
+
+    normalized_target = _normalize_match_text(raw_target)
+    exact_matches = [
+        post for post in posts
+        if _normalize_match_text(_post_title_text(post)) == normalized_target
+        or _normalize_match_text(post.get('slug') or '') == normalized_target
+    ]
+    if len(exact_matches) == 1:
+        post_id = exact_matches[0].get('id')
+        if post_id is None:
+            raise ValueError(f"Post found for '{raw_target}' has no ID")
+        return fetch_wp_post_edit(url, headers, post_id)
+    if len(exact_matches) > 1:
+        details = ', '.join(f"{_post_title_text(post)} (id={post.get('id')})" for post in exact_matches)
+        raise ValueError(f"Multiple posts exactly match '{raw_target}': {details}. Use the numeric post ID.")
+
+    raise ValueError(f"No post found matching '{raw_target}'.")
 
 
 def _fetch_scheduled_post_matches(url, headers):
@@ -1989,6 +2075,97 @@ def update_post_wp_api(url, headers, content_md, meta=None, post_id=None, post_s
     row['status'] = updated.get('status') or row['status']
     row['link'] = updated.get('link') or row['link']
     updated_title = _extract_wp_text(updated.get('title'))
+    if updated_title:
+        row['title'] = updated_title
+    return {
+        'row': row,
+        'payload': payload,
+        'post': updated,
+    }
+
+
+def update_existing_post_wp_api(
+    url,
+    headers,
+    target,
+    content_md=None,
+    update_fields=None,
+    publish_date=None,
+    status=None,
+    dry_run=False,
+    preview=False,
+    tz_name=DEFAULT_TIMEZONE,
+):
+    fields = set(update_fields or ['content'])
+    allowed_fields = {'content', 'title', 'date', 'status'}
+    unknown = fields - allowed_fields
+    if unknown:
+        raise ValueError(f"Unsupported update field(s): {', '.join(sorted(unknown))}")
+    if not fields:
+        raise ValueError('At least one update field is required.')
+
+    needs_markdown = bool(fields & {'content', 'title'})
+    if needs_markdown and content_md is None:
+        raise ValueError('--content-md is required when updating content or title')
+
+    detail = resolve_update_post_target(url, headers, target)
+    resolved_post_id = detail.get('id')
+    if resolved_post_id is None:
+        raise ValueError('Resolved post is missing an ID')
+
+    payload = {}
+    if 'title' in fields:
+        title = extract_h1_title(content_md)
+        if not title:
+            raise ValueError('Markdown source must start with a level-1 heading to update title')
+        payload['title'] = title
+
+    if 'content' in fields:
+        body_md = strip_leading_h1(content_md or '')
+        normalized_content, _body_format = normalize_post_navigation_content(body_md.strip())
+        payload['content'] = normalized_content
+
+    if 'date' in fields:
+        schedule_dt = parse_update_post_datetime(publish_date, tz_name=tz_name)
+        payload['date'] = schedule_dt.strftime('%Y-%m-%dT%H:%M:%S')
+
+    if 'status' in fields:
+        if not status:
+            raise ValueError('--status is required when updating status')
+        payload['status'] = status
+
+    row = {
+        'operation': 'update-post',
+        'id': resolved_post_id,
+        'title': payload.get('title') or _post_title_text(detail),
+        'status': detail.get('status') or '',
+        'action': 'would-update' if dry_run else 'updated',
+        'dry_run': str(bool(dry_run)),
+        'content_changed': 'content' in fields,
+        'fields_changed': ','.join(sorted(fields)),
+        'link': detail.get('link') or '',
+    }
+
+    if preview:
+        row['payload'] = payload
+
+    if dry_run:
+        return {
+            'row': row,
+            'payload': payload,
+            'post': detail,
+        }
+
+    posts_url = build_wp_api_posts_url(url)
+    update_url = posts_url.rstrip('/') + f'/{resolved_post_id}'
+    response = requests.post(update_url, headers=headers, json=payload)
+    if response.status_code >= 400:
+        raise ValueError(f'Failed to update post {resolved_post_id}: {response.status_code} {response.text}')
+
+    updated = response.json()
+    row['status'] = updated.get('status') or row['status']
+    row['link'] = updated.get('link') or row['link']
+    updated_title = _post_title_text(updated)
     if updated_title:
         row['title'] = updated_title
     return {

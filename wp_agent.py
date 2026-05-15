@@ -728,6 +728,15 @@ def _write_suggestions_output(path: Path, fmt: str, suggest_output: dict[str, An
     return path
 
 
+def parse_update_fields(values: list[str] | None) -> list[str]:
+    if not values:
+        return ['content']
+    fields: list[str] = []
+    for value in values:
+        fields.extend(item.strip() for item in value.split(',') if item.strip())
+    return fields
+
+
 def handle_args():
     wpu.load_dotenv()
     parser = argparse.ArgumentParser(
@@ -760,6 +769,21 @@ def handle_args():
     parser.add_argument(
         '--unschedule',
         help='Unschedule future post(s) by ID, title, or date and change them to drafts.'
+    )
+    parser.add_argument(
+        '--update-post',
+        help='Update an existing WordPress post by exact title, slug, or numeric post ID.'
+    )
+    parser.add_argument(
+        '--update',
+        action='append',
+        metavar='FIELD[,FIELD...]',
+        help='What to update for --update-post: content, title, date, status. Defaults to content.'
+    )
+    parser.add_argument(
+        '--status',
+        choices=['draft', 'publish', 'future', 'private'],
+        help='WordPress status to set when using --update status.'
     )
     parser.add_argument(
         '--schedule',
@@ -855,11 +879,17 @@ def handle_args():
     log.info(f'+  Invoke LLM: {args.invoke_llm}')
     if args.unschedule:
         log.info(f'+  Unschedule target: {args.unschedule}')
+    if args.update_post:
+        log.info(f'+  Update post target: {args.update_post}')
+    if args.update:
+        log.info(f'+  Update fields: {args.update}')
+    if args.status:
+        log.info(f'+  Status: {args.status}')
     if args.suggest:
         log.info('+  Suggest enabled (topic ideas only)')
     if args.meta_json:
         log.info(f'+  Meta JSON: {args.meta_json}')
-    if not args.unschedule:
+    if not args.unschedule and not args.update_post:
         log.info(f'+  Schedule: {args.schedule}')
     if args.dry_run:
         log.info('+  Dry run enabled (no publish)')
@@ -908,6 +938,76 @@ def run_agentic_workflow(args) -> tuple[int, dict[str, Any]]:
             out_path = out_dir / 'unschedule_results.json'
             out_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding='utf-8')
             log.info(f'Wrote unschedule results => {out_path}')
+        return 0, {}
+
+    if args.update_post:
+        if not (args.wp_username and args.wp_app_password):
+            log.error('Missing WP credentials for update-post.')
+            return 2, {}
+        update_fields = parse_update_fields(args.update)
+        needs_markdown = bool(set(update_fields) & {'content', 'title'})
+        md_list = _expand_md_list(args.content_md) if args.content_md else []
+        if needs_markdown and len(md_list) != 1:
+            log.error('Provide exactly one --content-md file when updating content or title.')
+            return 2, {}
+        if 'date' in update_fields and not args.publish_date:
+            log.error('Provide --publish-date when updating date.')
+            return 2, {}
+        if 'status' in update_fields and not args.status:
+            log.error('Provide --status when updating status.')
+            return 2, {}
+
+        content_for_update = None
+        base_dir = Path.cwd()
+        if needs_markdown:
+            source_path = Path(md_list[0])
+            if not source_path.exists():
+                log.error(f'Markdown file not found: {source_path}')
+                return 2, {}
+            markdown_text = source_path.read_text(encoding='utf-8')
+            content_for_update = markdown_text
+            base_dir = source_path.parent
+            if not args.dry_run:
+                try:
+                    content_for_update, uploads = wpu.upload_media_and_replace(
+                        content_for_update,
+                        str(base_dir),
+                        args.url,
+                        headers,
+                    )
+                except ValueError as exc:
+                    log.error(str(exc))
+                    return 2, {}
+                if uploads:
+                    log.info(f'Uploaded {len(uploads)} image(s)')
+
+        try:
+            result = wpu.update_existing_post_wp_api(
+                args.url,
+                headers,
+                args.update_post,
+                content_md=content_for_update,
+                update_fields=update_fields,
+                publish_date=args.publish_date,
+                status=args.status,
+                dry_run=args.dry_run,
+                preview=args.preview,
+                tz_name=wpu.DEFAULT_TIMEZONE,
+            )
+        except ValueError as exc:
+            log.error(str(exc))
+            return 2, {}
+
+        row = result.get('row') or {}
+        if row:
+            print(wpu.render_ascii_table([row]))
+        if args.preview:
+            print(json.dumps(result.get('payload') or {}, indent=2))
+        out_dir = Path(args.outdir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / 'update_post_result.json'
+        out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+        log.info(f'Wrote update result => {out_path}')
         return 0, {}
 
     _init_google_client(os.environ.get('GOOGLE_ADK_API_KEY'), args.llm_model)

@@ -285,6 +285,94 @@ def test_resolve_unschedule_posts_by_name_rejects_ambiguous_partial(monkeypatch)
         )
 
 
+def test_resolve_update_post_target_by_title(monkeypatch):
+    calls = {}
+
+    monkeypatch.setattr(wp_utilities, "find_post_by_slug", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        wp_utilities,
+        "fetch_wp_endpoint",
+        lambda *_args, **_kwargs: [
+            {
+                "id": 57067,
+                "slug": "kill-your-darlings",
+                "title": {"rendered": "Kill Your Darlings"},
+            }
+        ],
+    )
+
+    def fake_fetch_edit(url, headers, post_id):
+        calls["post_id"] = post_id
+        return {"id": post_id, "title": {"raw": "Kill Your Darlings"}}
+
+    monkeypatch.setattr(wp_utilities, "fetch_wp_post_edit", fake_fetch_edit)
+
+    post = wp_utilities.resolve_update_post_target(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "Kill Your Darlings",
+    )
+
+    assert post["id"] == 57067
+    assert calls["post_id"] == 57067
+
+
+def test_update_existing_post_wp_api_replaces_content_and_date(monkeypatch):
+    posted = {}
+
+    monkeypatch.setattr(
+        wp_utilities,
+        "resolve_update_post_target",
+        lambda *_args, **_kwargs: {
+            "id": 57067,
+            "status": "future",
+            "link": "https://example.com/?p=57067",
+            "title": {"raw": "Kill Your Darlings"},
+        },
+    )
+    monkeypatch.setattr(
+        wp_utilities,
+        "normalize_post_navigation_content",
+        lambda text: (f"<p>{text}</p>", "markdown"),
+    )
+    monkeypatch.setattr(wp_utilities, "build_wp_api_posts_url", lambda _url: "https://example.com/wp-json/wp/v2/posts")
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {
+                "id": 57067,
+                "status": "future",
+                "link": "https://example.com/?p=57067",
+                "title": {"raw": "Kill Your Darlings"},
+            }
+
+    def fake_post(url, headers=None, json=None):
+        posted["url"] = url
+        posted["json"] = json
+        return Response()
+
+    monkeypatch.setattr(wp_utilities.requests, "post", fake_post)
+
+    result = wp_utilities.update_existing_post_wp_api(
+        "https://example.com",
+        {"Authorization": "Basic token"},
+        "Kill Your Darlings",
+        content_md="# Kill Your Darlings\n\nUpdated body.",
+        update_fields=["content", "date"],
+        publish_date="05-18-2026",
+    )
+
+    assert result["row"]["id"] == 57067
+    assert result["row"]["fields_changed"] == "content,date"
+    assert posted["url"].endswith("/57067")
+    assert posted["json"]["content"] == "<p>Updated body.</p>"
+    assert posted["json"]["date"] == "2026-05-18T08:44:00"
+
+
 def test_unschedule_posts_wp_api_dry_run_matches_date(monkeypatch):
     monkeypatch.setattr(
         wp_utilities,
